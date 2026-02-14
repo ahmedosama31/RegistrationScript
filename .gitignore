@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+
+# Local environments
+.venv/
+venv/
+
+# Selenium / webdriver cache
+.wdm/
+
+# IDE / OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Runtime artifacts and captured data (sensitive)
+debug_*.xml
+*.har
+*.log
+*.html
+*_analysis.txt

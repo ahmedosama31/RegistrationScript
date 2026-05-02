@@ -18,6 +18,7 @@ Thumbs.db
 
 # Runtime artifacts and captured data (sensitive)
 debug_*.xml
+.registration_bot_credentials.json
 *.har
 *.log
 *.html

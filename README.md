@@ -24,13 +24,69 @@ pip install -r requirements.txt
 
 ## Usage
 
-Dry-run (recommended first):
+Use schedule-plan as the visual planner:
+
+```bash
+python register.py --gui
+```
+
+This opens [schedule-plan](https://schedule-plan.pages.dev/). Build your schedule there, then return to the terminal and paste the Share link, or enter the schedule-plan student ID for a saved schedule. The script imports those selected sections and maps them to SIS `SchId`s after login.
+
+The default `--gui` flow asks for your saved schedule-plan student ID. Press Enter at that prompt only if you want to paste a Share link instead.
+
+Import directly from a schedule-plan Share link:
+
+```bash
+python register.py --schedule-plan-url "https://schedule-plan.pages.dev/?share=..."
+```
+
+Import a saved schedule-plan schedule:
+
+```bash
+python register.py --schedule-plan-student-id 1240002
+```
+
+Interactive dry-run (recommended first):
+
+```bash
+python register.py
+```
+
+or:
+
+```bash
+python register.py --interactive
+```
+
+After login, the script loads the timetable, shows available courses, then lets you choose section numbers from a list. Dry-run is the default, so the final registration request is not sent unless you add `--live`.
+
+Interactive live mode:
+
+```bash
+python register.py --interactive --live
+```
+
+The script asks for confirmation before continuing in live mode.
+
+Remember Student ID and final password locally:
+
+```bash
+python register.py --interactive --remember-credentials
+```
+
+On Windows, the password is protected with DPAPI for your Windows account and saved in `.registration_bot_credentials.json`. The file is ignored by git. To delete saved credentials:
+
+```bash
+python register.py --forget-credentials
+```
+
+CLI dry-run:
 
 ```bash
 python register.py --course CMPS211 --add-section "Sunday 4-6" --add-section "Monday 2-4"
 ```
 
-Live mode (actually submits registration):
+CLI live mode (actually submits registration):
 
 ```bash
 python register.py --course CMPS211 --add-section "Sunday 4-6" --add-section "Monday 2-4" --live

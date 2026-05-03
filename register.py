@@ -27,7 +27,10 @@ try:
     import ddddocr as _ddddocr_module
     _ocr = _ddddocr_module.DdddOcr(show_ad=False)
     DDDDOCR_AVAILABLE = True
-except Exception:
+except Exception as _ddddocr_exc:
+    import traceback as _tb
+    print(f"[ddddocr] Could not load – falling back to manual captcha. Reason: {_ddddocr_exc}")
+    _tb.print_exc()
     _ocr = None
     DDDDOCR_AVAILABLE = False
 
@@ -1784,54 +1787,70 @@ class RegistrationClient:
         self.final_soup = soup # Store for captcha guid extraction
         return True
 
-    def solve_captcha(self):
+    def solve_captcha(self, manual=False):
         """Step 3a: Solve captcha – auto first, manual fallback.
+
+        Parameters
+        ----------
+        manual : bool
+            If True, skip auto-solve and go straight to manual input
+            (used after auto-solve has already failed on a previous attempt).
 
         Strategy
         --------
-        1. Download the captcha image bytes.
-        2. If ddddocr is available, attempt automatic OCR up to
-           AUTO_CAPTCHA_MAX_RETRIES times.  Each failed attempt fetches a
-           *fresh* captcha image from the server (SIS regenerates it on every
-           request), so we don't keep retrying the same image.
-        3. If all auto-attempts fail (or ddddocr is not installed), fall back
-           to showing the image and asking the user to type the answer.
+        1. Download + preprocess the captcha image (grayscale, 3x upscale, binarize).
+        2. If ddddocr is available and manual=False, attempt automatic OCR once.
+        3. Fall back to showing the image and asking the user to type the answer.
         """
-        if DDDDOCR_AVAILABLE:
-            logger.info("Attempting automatic captcha solving with ddddocr...")
-            for attempt in range(1, AUTO_CAPTCHA_MAX_RETRIES + 1):
-                img_bytes = self._get_captcha_image_bytes()
-                if img_bytes is None:
-                    logger.warning("Could not download captcha image; falling back to manual input.")
-                    break
-                try:
-                    result = _ocr.classification(img_bytes)
-                    # Strip whitespace; SIS captchas are typically 4-6 alphanumeric chars.
-                    result = (result or "").strip()
-                    if result:
-                        logger.info(f"Auto-captcha attempt {attempt}: got '{result}'")
-                        return result
-                    logger.warning(f"Auto-captcha attempt {attempt}: empty result, retrying...")
-                except Exception as exc:
-                    logger.warning(f"Auto-captcha attempt {attempt} failed with error: {exc}")
-            logger.warning(
-                f"Auto-captcha failed after {AUTO_CAPTCHA_MAX_RETRIES} attempts. "
-                "Falling back to manual input."
-            )
-        else:
+        img_bytes = self._get_captcha_image_bytes()
+        if img_bytes is None:
+            return None
+
+        if DDDDOCR_AVAILABLE and not manual:
+            processed = self._preprocess_captcha_for_ocr(img_bytes)
+            try:
+                result = _ocr.classification(processed)
+                result = (result or "").strip()
+                if result:
+                    logger.info(f"Auto-captcha solved: '{result}'")
+                    return result
+                logger.warning("Auto-captcha returned empty result; falling back to manual input.")
+            except Exception as exc:
+                logger.warning(f"Auto-captcha OCR error: {exc}; falling back to manual input.")
+        elif not DDDDOCR_AVAILABLE:
             logger.info(
-                "ddddocr is not installed. Install it with: pip install ddddocr\n"
+                "ddddocr is not installed (pip install ddddocr). "
                 "Falling back to manual captcha input."
             )
 
         # --- Manual fallback ---
-        img_bytes = self._get_captcha_image_bytes()
-        if img_bytes is None:
-            return None
         img = Image.open(BytesIO(img_bytes))
         img.show()
         captcha_text = input("Enter Captcha Text: ").strip()
         return captcha_text
+
+    @staticmethod
+    def _preprocess_captcha_for_ocr(img_bytes):
+        """Preprocess captcha image to improve ddddocr accuracy.
+
+        Steps: grayscale -> 3x upscale (LANCZOS) -> adaptive binarize.
+        Returns preprocessed PNG bytes (falls back to raw bytes on error).
+        """
+        try:
+            img = Image.open(BytesIO(img_bytes)).convert("L")  # greyscale
+            w, h = img.size
+            img = img.resize((w * 3, h * 3), Image.LANCZOS)    # upscale
+            # Compute a simple per-image threshold (mean of pixel values)
+            import statistics
+            pixels = list(img.getdata())
+            threshold = statistics.mean(pixels)
+            img = img.point(lambda p: 255 if p > threshold else 0)  # binarize
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            return buf.getvalue()
+        except Exception as exc:
+            logger.warning(f"Captcha preprocessing failed ({exc}); using raw bytes.")
+            return img_bytes
 
     def _get_captcha_image_bytes(self):
         """Download the captcha image and return raw bytes (or None on failure)."""
@@ -1964,6 +1983,16 @@ class RegistrationClient:
                 result_html = self.submit_payload_in_browser(url, payload)
                 if not result_html:
                     return False
+                if self._is_wrong_captcha_response(result_html):
+                    logger.warning("Wrong captcha or password detected in response.")
+                    # Update final_soup with the fresh page so the next attempt
+                    # picks up the NEW captcha GUID the server embedded there.
+                    new_soup = BeautifulSoup(result_html, "html.parser")
+                    if new_soup.find('img', src=re.compile(r'CaptchaImage\.aspx')):
+                        self.final_soup = new_soup
+                        self._update_page_state(new_soup, "wrong-captcha retry page")
+                        logger.info("Updated captcha source to fresh GUID from error page.")
+                    return "wrong_captcha"
                 logger.info("Registration request submitted in visible Chrome. Check the browser result.")
                 self.summarize_registration_result(result_html)
                 if "success" in result_html.lower() or "registered" in result_html.lower():
@@ -1975,6 +2004,14 @@ class RegistrationClient:
                 logger.info("SENDING REGISTRATION REQUEST...")
                 resp = self.session.post(url, data=payload)
                 if resp.status_code == 200:
+                    if self._is_wrong_captcha_response(resp.text):
+                        logger.warning("Wrong captcha or password detected in response.")
+                        new_soup = BeautifulSoup(resp.text, "html.parser")
+                        if new_soup.find('img', src=re.compile(r'CaptchaImage\.aspx')):
+                            self.final_soup = new_soup
+                            self._update_page_state(new_soup, "wrong-captcha retry page")
+                            logger.info("Updated captcha source to fresh GUID from error page.")
+                        return "wrong_captcha"
                     logger.info("Registration request sent! Check result.")
                     self.summarize_registration_result(resp.text)
                     if "success" in resp.text.lower() or "registered" in resp.text.lower():
@@ -1985,6 +2022,17 @@ class RegistrationClient:
                 else:
                     logger.error(f"Registration failed: {resp.status_code}")
                     return False
+
+    @staticmethod
+    def _is_wrong_captcha_response(html):
+        """Return True if the SIS response indicates a wrong captcha or password."""
+        lowered = html.lower()
+        return (
+            "incorrect verification code" in lowered
+            or "incorrect password" in lowered
+            or ("verification code" in lowered and "make sure" in lowered
+                and "register" not in lowered[:500].lower())
+        )
 
 def collect_cli_options(user_id):
     print("\nSIS Registration Bot")
@@ -2130,17 +2178,43 @@ def main():
     if not client.submit_selection():
         sys.exit(1)
         
-    # 6. Captcha
-    captcha_text = client.solve_captcha()
-    if not captcha_text:
-        sys.exit(1)
-
+    # 6. Captcha + 7. Finalize (with auto-retry on wrong captcha)
     if not client.confirm_final_registration_request():
         logger.info("Cancelled before final registration request.")
         sys.exit(0)
-        
-    # 7. Finalize
-    client.finalize_registration(captcha_text, password)
+
+    MAX_CAPTCHA_ATTEMPTS = 5
+    AUTO_SOLVE_ATTEMPTS  = 2   # switch to manual input after this many failures
+
+    for captcha_attempt in range(1, MAX_CAPTCHA_ATTEMPTS + 1):
+        use_manual = captcha_attempt > AUTO_SOLVE_ATTEMPTS
+        if captcha_attempt > 1:
+            mode_label = "manual" if use_manual else "auto"
+            logger.info(
+                f"Captcha attempt {captcha_attempt}/{MAX_CAPTCHA_ATTEMPTS} ({mode_label})..."
+            )
+
+        captcha_text = client.solve_captcha(manual=use_manual)
+        if not captcha_text:
+            logger.error("No captcha text obtained; aborting.")
+            sys.exit(1)
+
+        result = client.finalize_registration(captcha_text, password)
+
+        if result == "wrong_captcha":
+            if captcha_attempt < MAX_CAPTCHA_ATTEMPTS:
+                logger.warning(
+                    f"Captcha attempt {captcha_attempt} was wrong. "
+                    f"Retrying ({MAX_CAPTCHA_ATTEMPTS - captcha_attempt} left)..."
+                )
+                continue
+            else:
+                logger.error("Captcha failed on all attempts. Aborting.")
+                sys.exit(1)
+        elif not result:
+            sys.exit(1)
+        else:
+            break   # success
 
     if browser_driver:
         logger.info("Chrome is still open for inspection. Close it manually when you are done.")

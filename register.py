@@ -2,13 +2,13 @@ import time
 import re
 import json
 import logging
-import argparse
 import sys
 import os
 import base64
 import ctypes
 import getpass
 import webbrowser
+import html as html_lib
 import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -35,6 +35,7 @@ XML_HANDLER_PATH = "/SIS/Modules/MyXMLHandler.ashx"
 CAPTCHA_PATH = "/SIS/Modules/CaptchaImage.aspx"
 SCHEDULE_PLAN_URL = "https://schedule-plan.pages.dev/"
 SCHEDULE_PLAN_API_BASE = "https://schedule-plan.pages.dev/api"
+REGISTRATION_CHECK_INTERVAL_SECONDS = 5
 
 # Optional local fallback if dynamic extraction fails.
 # Keep empty in shared code; provide interactively when prompted.
@@ -148,6 +149,12 @@ class CredentialStore:
     def get_user_id(self):
         return self.data.get("user_id")
 
+    def get_force_preserve_course_codes(self):
+        codes = self.data.get("force_preserve_course_codes") or []
+        if isinstance(codes, str):
+            codes = [codes]
+        return {normalize_course_code(code) for code in codes if normalize_course_code(code)}
+
     def save_user_id(self, user_id):
         if not self.remember or not user_id:
             return
@@ -155,6 +162,10 @@ class CredentialStore:
         self._save()
 
     def get_password(self):
+        password = self.data.get("password")
+        if password:
+            return password
+
         protected = self.data.get("password_dpapi")
         if not protected:
             return None
@@ -167,8 +178,30 @@ class CredentialStore:
     def save_password(self, password):
         if not self.remember or not password:
             return
-        self.data["password_dpapi"] = protect_secret(password)
+        self.data["password"] = password
+        self.data.pop("password_dpapi", None)
         self._save()
+
+    def ensure_login_credentials(self):
+        changed = False
+        user_id = self.get_user_id()
+        if not user_id:
+            user_id = input("Enter your SIS Student ID: ").strip()
+            self.data["user_id"] = user_id
+            changed = True
+
+        password = self.get_password()
+        if not password:
+            password = getpass.getpass("Enter your SIS Password: ").strip()
+            self.data["password"] = password
+            self.data.pop("password_dpapi", None)
+            changed = True
+
+        if changed:
+            self._save()
+            logger.info(f"Saved credentials to editable file: {os.path.abspath(self.path)}")
+
+        return user_id, password
 
 
 def period_to_time_range(period):
@@ -192,12 +225,32 @@ def format_period_with_time(period):
     return f"{period} ({rng[0]}-{rng[1]})"
 
 
+def normalize_course_code(code):
+    return re.sub(r"[^A-Z0-9]", "", (code or "").upper())
+
+
 def parse_yes_no(prompt, default=False):
     suffix = " [Y/n]: " if default else " [y/N]: "
     answer = input(prompt + suffix).strip().lower()
     if not answer:
         return default
     return answer in {"y", "yes"}
+
+
+def prompt_choice(prompt, choices):
+    """Show a numbered menu and return the selected choice key."""
+    print()
+    print(prompt)
+    for idx, (_, label) in enumerate(choices, start=1):
+        print(f"  {idx}. {label}")
+
+    while True:
+        raw = input("Choose an option: ").strip()
+        if raw.isdigit():
+            idx = int(raw)
+            if 1 <= idx <= len(choices):
+                return choices[idx - 1][0]
+        print(f"Please enter a number from 1 to {len(choices)}.")
 
 
 def parse_number_list(raw, max_value):
@@ -277,26 +330,63 @@ def normalize_period_input(period_text):
     return converted, note
 
 
-def split_multi_session_sections(courses):
-    """Mirror schedule-plan's frontend normalization for section IDs."""
+def parse_section_targets(section_texts):
+    """
+    Convert typed section filters into (day, period) tuples.
+    Accepts values like 'Monday 2:3', 'Sunday 4-6', or 'Sunday 4:00-6:00'.
+    """
+    specific_sections = []
+    for section_text in section_texts:
+        parts = section_text.strip().split()
+        if len(parts) >= 2:
+            day = parts[0]
+            period, note = normalize_period_input(parts[1])
+            if note:
+                logger.info(note)
+            mapped = period_to_time_range(period)
+            if mapped and re.fullmatch(r"\d+:\d+", period):
+                logger.info(f"Section filter '{day} {period}' maps to actual time {mapped[0]}-{mapped[1]}.")
+            specific_sections.append((day, period))
+        else:
+            logger.warning(f"Invalid section format: '{section_text}'. Expected 'Day Period'. Ignoring.")
+    return specific_sections
+
+
+def same_schedule_plan_session(left, right):
+    return (
+        left.get("day") == right.get("day")
+        and left.get("startHour") == right.get("startHour")
+        and left.get("endHour") == right.get("endHour")
+        and left.get("location") == right.get("location")
+    )
+
+
+def merge_schedule_plan_sections(courses):
+    """Mirror schedule-plan's frontend normalization for grouped section IDs."""
     normalized_courses = []
     for course in courses:
-        normalized_sections = []
+        sections_by_key = {}
         for section in course.get("sections", []):
-            sessions = section.get("sessions") or []
-            if len(sessions) <= 1:
-                normalized_sections.append(section)
-                continue
-            for idx, session in enumerate(sessions):
+            key = f"{section.get('courseCode')}|{section.get('type')}|{section.get('group')}"
+            existing = sections_by_key.get(key)
+            section_id = section.get("id")
+            section_legacy_ids = section.get("legacyIds") or []
+
+            if not existing:
                 copied = section.copy()
-                copied["id"] = (
-                    f"{section.get('id')}-{session.get('day')}-"
-                    f"{session.get('startString')}-{session.get('endString')}-{idx}"
-                )
-                copied["sessions"] = [session]
-                normalized_sections.append(copied)
+                copied["legacyIds"] = list(dict.fromkeys(section_legacy_ids + ([section_id] if section_id else [])))
+                copied["sessions"] = list(section.get("sessions") or [])
+                sections_by_key[key] = copied
+                continue
+
+            legacy_ids = existing.get("legacyIds") or []
+            existing["legacyIds"] = list(dict.fromkeys(legacy_ids + section_legacy_ids + ([section_id] if section_id else [])))
+            for session in section.get("sessions") or []:
+                if not any(same_schedule_plan_session(session, current) for current in existing.get("sessions") or []):
+                    existing.setdefault("sessions", []).append(session)
+
         copied_course = course.copy()
-        copied_course["sections"] = normalized_sections
+        copied_course["sections"] = list(sections_by_key.values())
         normalized_courses.append(copied_course)
     return normalized_courses
 
@@ -304,7 +394,7 @@ def split_multi_session_sections(courses):
 def fetch_schedule_plan_courses():
     resp = requests.get(f"{SCHEDULE_PLAN_API_BASE}/courses", timeout=30)
     resp.raise_for_status()
-    return split_multi_session_sections(resp.json())
+    return merge_schedule_plan_sections(resp.json())
 
 
 def decode_schedule_plan_share_url(url):
@@ -333,8 +423,16 @@ def fetch_schedule_plan_saved_schedule(student_id, schedule_name=None):
 
 
 def normalize_schedule_plan_selections(raw_items):
+    if isinstance(raw_items, dict):
+        for key in ("courses", "selections", "selectedCourses", "schedule"):
+            if isinstance(raw_items.get(key), list):
+                raw_items = raw_items[key]
+                break
+        else:
+            raw_items = [raw_items]
+
     selections = []
-    for item in raw_items:
+    for item in raw_items or []:
         course_code = item.get("courseCode") or item.get("c")
         if not course_code:
             continue
@@ -344,6 +442,13 @@ def normalize_schedule_plan_selections(raw_items):
             "selectedTutorialId": item.get("selectedTutorialId") or item.get("t"),
             "selectedLabId": item.get("selectedLabId") or item.get("b"),
             "selectedMthsGroup": item.get("selectedMthsGroup") or item.get("m"),
+            "selectedSectionIds": (
+                item.get("selectedSectionIds")
+                or item.get("sectionIds")
+                or item.get("selectedSections")
+                or item.get("sections")
+                or item.get("ids")
+            ),
         })
     return selections
 
@@ -393,6 +498,9 @@ def expand_schedule_plan_sections(selections, courses):
     planned_sections = []
     missing = []
 
+    def section_matches_id(section, section_id):
+        return section.get("id") == section_id or section_id in (section.get("legacyIds") or [])
+
     for selection in selections:
         course_code = selection["courseCode"]
         course = course_by_code.get(course_code)
@@ -414,8 +522,13 @@ def expand_schedule_plan_sections(selections, courses):
             selection.get("selectedTutorialId"),
             selection.get("selectedLabId"),
         ]
+        if isinstance(selection.get("selectedSectionIds"), list):
+            selected_ids.extend(selection["selectedSectionIds"])
+        elif selection.get("selectedSectionIds"):
+            selected_ids.append(selection["selectedSectionIds"])
+
         for section_id in [sid for sid in selected_ids if sid]:
-            section = next((section for section in sections if section.get("id") == section_id), None)
+            section = next((section for section in sections if section_matches_id(section, section_id)), None)
             if section:
                 planned_sections.append(section)
             else:
@@ -568,24 +681,209 @@ def map_schedule_plan_sections_to_sis(planned_sections, sis_lectures):
 
     return selected_schids
 
-def login_with_selenium():
+def _find_login_user_field(driver):
+    fields = driver.find_elements(By.CSS_SELECTOR, "input[type='text'], input:not([type])")
+    preferred = []
+    fallback = []
+    for field in fields:
+        if not field.is_displayed() or not field.is_enabled():
+            continue
+        name = (field.get_attribute("name") or "").lower()
+        field_id = (field.get_attribute("id") or "").lower()
+        if any(token in name or token in field_id for token in ["user", "login", "student", "id"]):
+            preferred.append(field)
+        fallback.append(field)
+    return (preferred or fallback)[0] if (preferred or fallback) else None
+
+
+def _find_login_submit_button(driver):
+    buttons = driver.find_elements(By.CSS_SELECTOR, "input[type='submit'], button[type='submit'], button")
+    preferred = []
+    fallback = []
+    for button in buttons:
+        if not button.is_displayed() or not button.is_enabled():
+            continue
+        label = " ".join(
+            [
+                button.get_attribute("value") or "",
+                button.text or "",
+                button.get_attribute("name") or "",
+                button.get_attribute("id") or "",
+            ]
+        ).lower()
+        if any(token in label for token in ["login", "log in", "sign in", "submit", "enter"]):
+            preferred.append(button)
+        fallback.append(button)
+    return (preferred or fallback)[0] if (preferred or fallback) else None
+
+
+def _page_text_from_html(html):
+    soup = BeautifulSoup(html, "html.parser")
+    return " ".join(soup.get_text(" ", strip=True).split())
+
+
+def _is_registration_closed_html(html):
+    text = _page_text_from_html(html).lower()
+    if "registration is closed" in text:
+        return True
+
+    soup = BeautifulSoup(html, "html.parser")
+    for element in soup.find_all(["input", "button"]):
+        label = (element.get("value") or element.get_text(" ", strip=True) or "").lower()
+        if "check" in label and "open" in label:
+            return True
+    return False
+
+
+def _looks_like_registration_table_html(html):
+    if _is_registration_closed_html(html):
+        return False
+    return (
+        "MyXMLHandler.ashx" in html
+        or 'name="ctl07$nextPage"' in html
+        or 'name="StdSelectedLecs"' in html
+        or 'id="ctl07_nextPage"' in html
+    )
+
+
+def _element_label(element):
+    return " ".join(
+        [
+            element.get_attribute("value") or "",
+            element.text or "",
+            element.get_attribute("name") or "",
+            element.get_attribute("id") or "",
+        ]
+    ).strip()
+
+
+def _find_visible_button_by_label(driver, required_words):
+    for element in driver.find_elements(By.CSS_SELECTOR, "input[type='submit'], input[type='button'], button"):
+        if not element.is_displayed() or not element.is_enabled():
+            continue
+        label = _element_label(element).lower()
+        if all(word in label for word in required_words):
+            return element, label.strip()
+    return None, None
+
+
+def _check_visible_agreement_checkbox(driver):
+    checkboxes = driver.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+    for checkbox in checkboxes:
+        if not checkbox.is_displayed() or not checkbox.is_enabled():
+            continue
+        checked = checkbox.is_selected()
+        if not checked:
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
+            driver.execute_script("arguments[0].click();", checkbox)
+            logger.info("Checked the registration approval checkbox in Chrome.")
+            time.sleep(0.5)
+        return True
+    return False
+
+
+def _click_approval_next_if_available(driver):
+    approval_checkbox_seen = _check_visible_agreement_checkbox(driver)
+    buttons = driver.find_elements(By.CSS_SELECTOR, "input[type='submit'], input[type='button'], button")
+    for button in buttons:
+        if not button.is_displayed():
+            continue
+        label = _element_label(button).lower()
+        if "next" not in label:
+            continue
+        if not button.is_enabled():
+            logger.info("Approval Next button is still disabled after checking the checkbox.")
+            time.sleep(1)
+            return True
+        logger.info(f"Clicking approval button '{label or 'Next'}' in Chrome.")
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
+        driver.execute_script("arguments[0].click();", button)
+        return True
+    if approval_checkbox_seen:
+        logger.info("Approval checkbox was found, but Next button was not ready yet.")
+        time.sleep(1)
+        return True
+    return False
+
+
+def wait_for_registration_to_open_in_browser(driver):
+    """Use visible Chrome to refresh/click until SIS shows the registration table."""
+    registration_url = urljoin(BASE_URL, REGISTRATION_PATH)
+    logger.info("Opening registration page in visible Chrome.")
+    driver.get(registration_url)
+    attempt = 1
+
+    while True:
+        html = driver.page_source
+
+        if _looks_like_registration_table_html(html):
+            logger.info("Registration timetable is visible in Chrome.")
+            with open("debug_registration_open_browser.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            logger.info("Saved visible browser registration page to 'debug_registration_open_browser.html'.")
+            return html
+
+        if _click_approval_next_if_available(driver):
+            time.sleep(1)
+            continue
+
+        check_button, check_label = _find_visible_button_by_label(driver, ["check", "open"])
+        if check_button:
+            logger.info(
+                f"Registration is not open yet. Clicking '{check_label or 'Check if it is open now'}' "
+                f"in Chrome (attempt {attempt}). Press Ctrl+C to cancel."
+            )
+            driver.execute_script("arguments[0].click();", check_button)
+        else:
+            logger.info(
+                f"Registration table is not visible yet. Refreshing registration page in Chrome "
+                f"(attempt {attempt}). Press Ctrl+C to cancel."
+            )
+            driver.refresh()
+
+        attempt += 1
+        time.sleep(REGISTRATION_CHECK_INTERVAL_SECONDS)
+
+
+def login_with_selenium(user_id, password):
     """Use Selenium to handle login and extract session cookies."""
-    logger.info("Launching Selenium Chrome for login...")
+    logger.info("Launching visible Selenium Chrome for login and registration-open checking...")
     options = webdriver.ChromeOptions()
-    # options.add_argument('--headless')  # Comment out to see the browser
     driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
     
     try:
         driver.get(BASE_URL)
-        logger.info("Please log in manually in the browser window.")
+        logger.info("Logging in with saved SIS credentials...")
+
+        password_field = WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "input[type='password']"))
+        )
+        user_field = _find_login_user_field(driver)
+        if user_field is None:
+            logger.error("Could not find the SIS Student ID login field.")
+            return None, None, None, driver
+
+        user_field.clear()
+        user_field.send_keys(user_id)
+        password_field.clear()
+        password_field.send_keys(password)
+
+        submit_button = _find_login_submit_button(driver)
+        if submit_button:
+            submit_button.click()
+        else:
+            password_field.submit()
+
         logger.info("Waiting for login to complete (redirect to /SIS/Default.aspx)...")
         
-        # Wait up to 120 seconds for user to login
         WebDriverWait(driver, 120).until(
             EC.url_contains("/SIS/Default.aspx")
         )
-        logger.info("Login detected! Extracting cookies...")
-        
+        logger.info("Login detected.")
+
+        registration_html = wait_for_registration_to_open_in_browser(driver)
+
+        logger.info("Extracting cookies from visible Chrome...")
         selenium_cookies = driver.get_cookies()
         session_cookies = {}
         for cookie in selenium_cookies:
@@ -593,8 +891,7 @@ def login_with_selenium():
             
         logger.info(f"Extracted {len(session_cookies)} cookies.")
         
-        # Extract Student GUID and User ID from dashboard source
-        page_source = driver.page_source
+        page_source = registration_html or driver.page_source
         
         # GUID Pattern 1: image.aspx?FileName=GUID
         # GUID Pattern 2: stdid=GUID (common in AJAX calls)
@@ -610,16 +907,25 @@ def login_with_selenium():
                 std_guid = guid_match_2.group(1)
                 logger.info(f"Found Student GUID (Pattern 2): {std_guid}")
             
-        return session_cookies, std_guid
+        return session_cookies, std_guid, registration_html, driver
         
     except Exception as e:
         logger.error(f"Login failed or timed out: {e}")
-        return None, None
+        return None, None, None, driver
     finally:
-        driver.quit()
+        logger.info("Leaving Chrome open so you can inspect what happened.")
 
 class RegistrationClient:
-    def __init__(self, cookies, std_guid=None, dry_run=True, credential_store=None):
+    def __init__(
+        self,
+        cookies,
+        std_guid=None,
+        dry_run=True,
+        credential_store=None,
+        registration_ready=False,
+        registration_html=None,
+        browser_driver=None,
+    ):
         self.session = requests.Session()
         self.session.cookies.update(cookies)
         self.dry_run = dry_run
@@ -630,9 +936,25 @@ class RegistrationClient:
         self.std_guid = std_guid
         self.user_id = None
         self.selected_lectures = []
+        self.selected_lecture_details = []
+        self.existing_selected_details = []
+        self.force_preserved_details = []
+        self.new_selected_details = []
         self.stdid_candidates = []
+        self.registration_table_ready = registration_ready
+        self.registration_html = registration_html
+        self.browser_driver = browser_driver
+        self.force_preserve_course_codes = set()
         if std_guid:
             self._add_stdid_candidate(std_guid)
+        if credential_store:
+            self.user_id = credential_store.get_user_id()
+            self.force_preserve_course_codes = credential_store.get_force_preserve_course_codes()
+
+        if registration_html:
+            soup = BeautifulSoup(registration_html, "html.parser")
+            if self._update_page_state(soup, "visible browser registration page"):
+                self._extract_identifiers_from_html(registration_html, source="visible browser registration page")
 
     def _add_stdid_candidate(self, stdid):
         """Store possible stdid values while preserving insertion order."""
@@ -725,15 +1047,17 @@ class RegistrationClient:
 
     def _update_page_state(self, soup, source):
         """Capture ASP.NET form state needed by the next postback."""
-        fields = {
+        required_fields = {
             "viewstate": "__VIEWSTATE",
-            "eventvalidation": "__EVENTVALIDATION",
             "viewstategenerator": "__VIEWSTATEGENERATOR",
+        }
+        optional_fields = {
+            "eventvalidation": "__EVENTVALIDATION",
         }
 
         values = {}
         missing = []
-        for attr, field_id in fields.items():
+        for attr, field_id in required_fields.items():
             element = soup.find("input", {"id": field_id})
             if not element or element.get("value") is None:
                 missing.append(field_id)
@@ -745,8 +1069,17 @@ class RegistrationClient:
             return False
 
         self.viewstate = values["viewstate"]
-        self.eventvalidation = values["eventvalidation"]
         self.viewstategenerator = values["viewstategenerator"]
+
+        for attr, field_id in optional_fields.items():
+            element = soup.find("input", {"id": field_id})
+            if element and element.get("value") is not None:
+                setattr(self, attr, element.get("value"))
+            else:
+                logger.warning(
+                    f"Optional form field {field_id} was not present after {source}; "
+                    "keeping the previous value."
+                )
         return True
 
     @staticmethod
@@ -762,17 +1095,200 @@ class RegistrationClient:
         if text:
             logger.info(f"{source} text preview: {text[:500]}")
 
+    @staticmethod
+    def _page_text(html):
+        soup = BeautifulSoup(html, "html.parser")
+        return " ".join(soup.get_text(" ", strip=True).split())
+
+    @staticmethod
+    def _is_registration_closed_page(soup, html):
+        text = RegistrationClient._page_text(html).lower()
+        if "registration is closed" in text:
+            return True
+
+        for element in soup.find_all(["input", "button"]):
+            label = (element.get("value") or element.get_text(" ", strip=True) or "").lower()
+            if "check" in label and "open" in label:
+                return True
+
+        return False
+
+    @staticmethod
+    def _looks_like_registration_table_page(soup, html):
+        if RegistrationClient._is_registration_closed_page(soup, html):
+            return False
+        if "MyXMLHandler.ashx" in html:
+            return True
+        return bool(
+            soup.find("input", attrs={"name": "ctl07$nextPage"})
+            or soup.find("input", attrs={"name": "StdSelectedLecs"})
+            or soup.find("input", attrs={"id": "ctl07_nextPage"})
+        )
+
+    @staticmethod
+    def _build_form_payload(soup):
+        payload = {}
+        for element in soup.find_all("input"):
+            name = element.get("name")
+            if not name:
+                continue
+            input_type = (element.get("type") or "").lower()
+            if input_type in {"submit", "button", "image", "reset"}:
+                continue
+            payload[name] = element.get("value", "")
+        return payload
+
+    @staticmethod
+    def _find_check_open_button(soup):
+        for element in soup.find_all(["input", "button"]):
+            label = (element.get("value") or element.get_text(" ", strip=True) or "").strip()
+            if "check" in label.lower() and "open" in label.lower():
+                return element, label
+        return None, None
+
+    @staticmethod
+    def _form_post_url(soup, default_url):
+        form = soup.find("form")
+        action = form.get("action") if form else None
+        if not action:
+            return default_url
+        return urljoin(default_url, action)
+
+    def wait_for_registration_to_open(self, html):
+        """Keep checking SIS until the registration timetable page is returned."""
+        url = urljoin(BASE_URL, REGISTRATION_PATH)
+        attempt = 1
+
+        while True:
+            try:
+                soup = BeautifulSoup(html, "html.parser")
+                self._extract_identifiers_from_html(html, source="registration wait page")
+
+                if self._looks_like_registration_table_page(soup, html):
+                    if self._update_page_state(soup, "registration opened page"):
+                        self.registration_table_ready = True
+                        logger.info("Registration is open. Timetable page is visible.")
+                        return True
+                    self._save_debug_html("debug_registration_open_response.html", html)
+                    self._log_page_text_preview(html, "Registration opened response")
+                    logger.warning("Registration looked open, but page state was incomplete. Checking again.")
+
+                elif not self._is_registration_closed_page(soup, html):
+                    if self._update_page_state(soup, "registration response"):
+                        logger.info("Registration page is not closed; continuing.")
+                        return True
+                    self._save_debug_html("debug_registration_wait_response.html", html)
+                    self._log_page_text_preview(html, "Registration wait response")
+                    logger.warning("Unexpected registration response. Checking again instead of stopping.")
+
+                else:
+                    button, button_label = self._find_check_open_button(soup)
+                    payload = None
+                    post_url = url
+
+                    if button is None:
+                        logger.warning(
+                            "Registration is closed, but the check button was not found. "
+                            "Reloading the registration page instead."
+                        )
+                        self._save_debug_html("debug_registration_closed_response.html", html)
+                        self._log_page_text_preview(html, "Registration closed response")
+                    else:
+                        payload = self._build_form_payload(soup)
+                        button_name = button.get("name")
+                        if button_name:
+                            payload[button_name] = button.get("value", button_label)
+                        else:
+                            button_id = button.get("id")
+                            if button_id:
+                                payload["__EVENTTARGET"] = button_id.replace("_", "$")
+                                payload["__EVENTARGUMENT"] = ""
+                        post_url = self._form_post_url(soup, url)
+
+                        logger.info(
+                            f"Registration is still closed. Pressing '{button_label}' "
+                            f"(attempt {attempt}); checking again in {REGISTRATION_CHECK_INTERVAL_SECONDS}s."
+                        )
+
+                    time.sleep(REGISTRATION_CHECK_INTERVAL_SECONDS)
+                    if payload is None:
+                        resp = self.session.get(url)
+                    else:
+                        resp = self.session.post(post_url, data=payload)
+
+                    if resp.status_code != 200:
+                        logger.warning(
+                            f"Registration check returned status {resp.status_code}. "
+                            f"Trying again in {REGISTRATION_CHECK_INTERVAL_SECONDS}s."
+                        )
+                        self._save_debug_html("debug_registration_check_response.html", resp.text)
+                        time.sleep(REGISTRATION_CHECK_INTERVAL_SECONDS)
+                        html = self.session.get(url).text
+                        attempt += 1
+                        continue
+
+                    html = resp.text
+                    attempt += 1
+                    continue
+
+                logger.info(
+                    f"Waiting for registration to open "
+                    f"(attempt {attempt}); checking again in {REGISTRATION_CHECK_INTERVAL_SECONDS}s. Press Ctrl+C to cancel."
+                )
+                time.sleep(REGISTRATION_CHECK_INTERVAL_SECONDS)
+                resp = self.session.get(url)
+                if resp.status_code == 200:
+                    html = resp.text
+                else:
+                    logger.warning(f"Registration page reload returned status {resp.status_code}. Retrying.")
+                attempt += 1
+
+            except KeyboardInterrupt:
+                logger.info("Cancelled while waiting for registration to open.")
+                return False
+            except Exception as exc:
+                logger.warning(
+                    f"Registration check failed with {exc.__class__.__name__}: {exc}. "
+                    f"Trying again in {REGISTRATION_CHECK_INTERVAL_SECONDS}s. Press Ctrl+C to cancel."
+                )
+                try:
+                    time.sleep(REGISTRATION_CHECK_INTERVAL_SECONDS)
+                    resp = self.session.get(url)
+                    if resp.status_code == 200:
+                        html = resp.text
+                except KeyboardInterrupt:
+                    logger.info("Cancelled while waiting for registration to open.")
+                    return False
+                except Exception as retry_exc:
+                    logger.warning(f"Retry reload also failed: {retry_exc}")
+                attempt += 1
+
     def get_registration_page(self):
         """Fetch the registration page and extract VIEWSTATE."""
+        if self.registration_table_ready and self.registration_html:
+            logger.info("Using registration page state captured from visible Chrome.")
+            soup = BeautifulSoup(self.registration_html, "html.parser")
+            if not self._update_page_state(soup, "visible browser registration page"):
+                return False
+            self._extract_identifiers_from_html(self.registration_html, source="visible browser registration page")
+            return True
+
         url = urljoin(BASE_URL, REGISTRATION_PATH)
         logger.info(f"Fetching registration page: {url}")
         
         resp = self.session.get(url)
         if resp.status_code != 200:
-            logger.error(f"Failed to fetch registration page: {resp.status_code}")
-            return False
+            logger.warning(
+                f"Registration page returned status {resp.status_code}. "
+                "Keeping the registration-open checker running."
+            )
+            return self.wait_for_registration_to_open(resp.text)
             
         soup = BeautifulSoup(resp.text, 'html.parser')
+        if self._is_registration_closed_page(soup, resp.text):
+            return self.wait_for_registration_to_open(resp.text)
+        if self._looks_like_registration_table_page(soup, resp.text):
+            return self.wait_for_registration_to_open(resp.text)
         if not self._update_page_state(soup, "registration page fetch"):
             return False
         self._extract_identifiers_from_html(resp.text, source="registration page")
@@ -781,6 +1297,10 @@ class RegistrationClient:
 
     def accept_approval(self):
         """Step 1: Click 'Next' on the approval message."""
+        if self.registration_table_ready:
+            logger.info("Registration timetable is already visible; skipping approval message.")
+            return True
+
         logger.info("Step 1: Accepting approval message...")
         url = urljoin(BASE_URL, REGISTRATION_PATH)
         
@@ -789,26 +1309,24 @@ class RegistrationClient:
             '__EVENTARGUMENT': '',
             '__VIEWSTATE': self.viewstate,
             '__VIEWSTATEGENERATOR': self.viewstategenerator,
-            '__EVENTVALIDATION': self.eventvalidation,
             'ctl07$ButMessageShown': 'Next>>',
             'ctl07$HiddenField1': SLOT_TIME_BOUNDS,
             'BData': ''
         }
+        if self.eventvalidation:
+            payload['__EVENTVALIDATION'] = self.eventvalidation
         
         resp = self.session.post(url, data=payload)
         if resp.status_code != 200:
-            logger.error("Failed to accept approval.")
+            logger.warning("Failed to accept approval. Keeping the registration-open checker running.")
             self._save_debug_html("debug_approval_response.html", resp.text)
             self._log_page_text_preview(resp.text, "Approval response")
-            return False
+            return self.wait_for_registration_to_open(resp.text)
             
-        # Update ViewState for next step
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        if not self._update_page_state(soup, "approval response"):
+        if not self.wait_for_registration_to_open(resp.text):
             self._save_debug_html("debug_approval_response.html", resp.text)
             self._log_page_text_preview(resp.text, "Approval response")
             return False
-        self._extract_identifiers_from_html(resp.text, source="approval response")
         return True
 
     def fetch_timetable(self):
@@ -917,9 +1435,30 @@ class RegistrationClient:
         existing_selected = []
         for day in root:
             for lecture in day:
-                if lecture.attrib.get('Selected') == '1':
-                    existing_selected.append(lecture.attrib.get('SchId'))
-        return existing_selected
+                sch_id = lecture.attrib.get('SchId')
+                if lecture.attrib.get('Selected') == '1' and sch_id:
+                    existing_selected.append(sch_id)
+        return list(dict.fromkeys(existing_selected))
+
+    @staticmethod
+    def collect_existing_selected_details(lectures):
+        return [lec for lec in lectures if lec["selected"] and lec["sch_id"]]
+
+    def collect_force_preserved_details(self, lectures):
+        preserve_codes = self.force_preserve_course_codes
+        if not preserve_codes:
+            return []
+        return [
+            lec for lec in lectures
+            if lec["sch_id"] and normalize_course_code(lec["code"]) in preserve_codes
+        ]
+
+    @staticmethod
+    def format_lecture_line(lecture):
+        return (
+            f"{lecture['code']} ({lecture['type']}) "
+            f"{lecture['day']} {lecture['period_label']} [SchId={lecture['sch_id']}]"
+        )
 
     def choose_course_interactively(self, lectures, initial_course=None):
         course_codes = sorted({lec["code"] for lec in lectures if lec["code"]})
@@ -991,14 +1530,123 @@ class RegistrationClient:
         if len(found_lectures) > 2 and not specific_sections:
             logger.warning(f"Found {len(found_lectures)} sections! You are registering for ALL of them.")
 
+        lectures = self.collect_lectures(root)
+        lecture_by_schid = {lec["sch_id"]: lec for lec in lectures if lec["sch_id"]}
         existing_selected = self.collect_existing_selected(root)
-        logger.info(f"Preserving {len(existing_selected)} existing registrations.")
+        force_preserved_details = self.collect_force_preserved_details(lectures)
+        force_preserved_schids = [lec["sch_id"] for lec in force_preserved_details]
+        found_lectures = [sch_id for sch_id in dict.fromkeys(found_lectures) if sch_id]
 
-        all_schids = [sch_id for sch_id in dict.fromkeys(existing_selected + found_lectures) if sch_id]
+        if existing_selected:
+            logger.info(
+                "Preserving existing selected SIS sections so nothing is deselected: "
+                + ", ".join(existing_selected)
+            )
+        else:
+            logger.info("No existing selected SIS sections were marked in the timetable XML.")
+
+        if force_preserved_details:
+            logger.warning(
+                "Force-preserving configured course(s) even if SIS XML says Selected=0: "
+                + ", ".join(self.format_lecture_line(lec) for lec in force_preserved_details)
+            )
+
+        all_schids = [
+            sch_id
+            for sch_id in dict.fromkeys(existing_selected + force_preserved_schids + found_lectures)
+            if sch_id
+        ]
+        if not all_schids:
+            logger.error("Refusing to submit an empty selection string.")
+            return False
         self.selected_lectures_str = "," + ",".join(all_schids) + ","
+        self.existing_selected_details = [
+            lecture_by_schid[sch_id] for sch_id in existing_selected if sch_id in lecture_by_schid
+        ]
+        self.force_preserved_details = [
+            lecture_by_schid[sch_id]
+            for sch_id in force_preserved_schids
+            if sch_id in lecture_by_schid and sch_id not in existing_selected
+        ]
+        self.new_selected_details = [
+            lecture_by_schid[sch_id]
+            for sch_id in found_lectures
+            if (
+                sch_id in lecture_by_schid
+                and sch_id not in existing_selected
+                and sch_id not in force_preserved_schids
+            )
+        ]
+        self.selected_lecture_details = [
+            lecture_by_schid[sch_id] for sch_id in all_schids if sch_id in lecture_by_schid
+        ]
         logger.info(f"Final Selection String: {self.selected_lectures_str}")
+        for code in sorted(self.force_preserve_course_codes):
+            if any(
+                normalize_course_code(lec["code"]) == code
+                for lec in self.existing_selected_details + self.force_preserved_details
+            ):
+                logger.info(f"{code} is included in the preserved selection payload.")
+            else:
+                logger.warning(f"{code} was configured for force-preservation but was not found in the SIS timetable.")
 
         return True
+
+    def confirm_selection_before_submit(self):
+        print("\nReview final SIS selection before anything is submitted:")
+        print("\nAlready selected in SIS and preserved:")
+        if self.existing_selected_details:
+            for lec in self.existing_selected_details:
+                print("  - " + self.format_lecture_line(lec))
+        else:
+            print("  - None detected")
+
+        print("\nForce-preserved because SIS can show it visually selected while XML says Selected=0:")
+        if self.force_preserved_details:
+            for lec in self.force_preserved_details:
+                print("  - " + self.format_lecture_line(lec))
+        else:
+            print("  - None")
+
+        print("\nNew selections to add:")
+        if self.new_selected_details:
+            for lec in self.new_selected_details:
+                print("  - " + self.format_lecture_line(lec))
+        else:
+            print("  - None")
+
+        print("\nFinal schedule payload includes:")
+        if self.selected_lecture_details:
+            for lec in self.selected_lecture_details:
+                print("  - " + self.format_lecture_line(lec))
+        else:
+            print("  - None")
+
+        if self.force_preserve_course_codes:
+            print("\nConfigured force-preservation checks:")
+            for code in sorted(self.force_preserve_course_codes):
+                preserved = any(
+                    normalize_course_code(lec["code"]) == code
+                    for lec in self.existing_selected_details + self.force_preserved_details
+                )
+                print(f"  - {code}: {'YES, included in final payload' if preserved else 'NO, not found to preserve'}")
+        print(f"Raw selection string that will be sent: {self.selected_lectures_str}")
+
+        return parse_yes_no("\nSubmit this selection to SIS?", default=False)
+
+    def confirm_final_registration_request(self):
+        print("\nFinal registration request review:")
+        print("These sections are still in the final selection string:")
+        if self.selected_lecture_details:
+            for lec in self.selected_lecture_details:
+                print("  - " + self.format_lecture_line(lec))
+        else:
+            print("  - None")
+        print(f"Raw selection string: {self.selected_lectures_str}")
+        if self.dry_run:
+            print("Dry-run is ON, so the final registration request will not actually be sent.")
+            return True
+        return parse_yes_no("\nSend the final LIVE registration request now?", default=False)
 
     def get_timetable_and_select_course(self, target_course_code, specific_sections=None, interactive=False):
         """Fetch XML timetable and find the SchIds for the target course sections."""
@@ -1096,22 +1744,30 @@ class RegistrationClient:
             '__EVENTARGUMENT': '',
             '__VIEWSTATE': self.viewstate,
             '__VIEWSTATEGENERATOR': self.viewstategenerator,
-            '__EVENTVALIDATION': self.eventvalidation,
             'ctl07$HiddenField1': SLOT_TIME_BOUNDS,
-            'ctl07$nextPage': 'Next+>>',
+            'ctl07$nextPage': 'Next >>',
             'StdSelectedLecs': self.selected_lectures_str,
             'StdSelectedLecs1': self.selected_lectures_str,
             'BData': ''
         }
+        if self.eventvalidation:
+            payload['__EVENTVALIDATION'] = self.eventvalidation
+        logger.info("Selection submit payload:")
+        logger.info(json.dumps(payload, indent=2, default=str)[:1200])
         
         resp = self.session.post(url, data=payload)
         if resp.status_code != 200:
             logger.error("Failed to submit selection.")
+            self._save_debug_html("debug_selection_submit_response.html", resp.text)
+            self._log_page_text_preview(resp.text, "Selection submit response")
             return False
 
         # Update ViewState for final step
         soup = BeautifulSoup(resp.text, 'html.parser')
+        self._save_debug_html("debug_selection_submit_response.html", resp.text)
+        self._log_page_text_preview(resp.text, "Selection submit response")
         if not self._update_page_state(soup, "selection submit"):
+            self._save_debug_html("debug_selection_submit_response.html", resp.text)
             return False
         self.final_soup = soup # Store for captcha guid extraction
         return True
@@ -1141,6 +1797,76 @@ class RegistrationClient:
         resp = self.session.get(captcha_url)
         return Image.open(BytesIO(resp.content))
 
+    @staticmethod
+    def _extract_course_codes_from_text(text):
+        return sorted(set(re.findall(r"\b[A-Z]{3,5}\d{3}\b", text or "")))
+
+    def summarize_registration_result(self, html):
+        self._save_debug_html("debug_final_registration_response.html", html)
+        soup = BeautifulSoup(html, "html.parser")
+        text = " ".join(soup.get_text(" ", strip=True).split())
+        lowered = text.lower()
+
+        print("\nSIS final registration response:")
+        print(text[:1200] if text else "(No visible text found in response.)")
+        if len(text) > 1200:
+            print("...response text truncated in terminal; full HTML saved to debug_final_registration_response.html")
+
+        course_codes = self._extract_course_codes_from_text(text)
+        if course_codes:
+            print("\nCourse codes visible in final response/schedule:")
+            for code in course_codes:
+                print(f"  - {code}")
+        else:
+            print("\nNo course codes were visible in the final response text.")
+
+        selected_payload_codes = sorted({
+            normalize_course_code(lec["code"])
+            for lec in self.selected_lecture_details
+            if lec.get("code")
+        })
+        if selected_payload_codes:
+            print("\nCourses you attempted to submit:")
+            for code in selected_payload_codes:
+                visible = code in course_codes
+                print(f"  - {code}: {'visible in result' if visible else 'not visible in result'}")
+
+        if any(word in lowered for word in ["no places", "no place", "full", "waiting", "rejected"]):
+            logger.warning("Final response contains a possible no-seat/waiting/rejected message. Check the saved HTML.")
+        if course_codes:
+            logger.info("Final response appears to contain a non-empty schedule/status result.")
+        else:
+            logger.warning("Final response did not show course codes; the resulting schedule may be empty.")
+
+    def submit_payload_in_browser(self, url, payload):
+        if not self.browser_driver:
+            logger.warning("No browser driver is available; falling back to HTTP final request.")
+            return None
+
+        logger.info("Submitting final registration request in visible Chrome so the website shows the result page.")
+        form_inputs = "".join(
+            f'<input type="hidden" name="{html_lib.escape(str(name), quote=True)}" '
+            f'value="{html_lib.escape(str(value), quote=True)}">'
+            for name, value in payload.items()
+        )
+        escaped_url = html_lib.escape(url, quote=True)
+        html = f"""
+        <html>
+          <body>
+            <form id="finalRegistrationForm" method="post" action="{escaped_url}">
+              {form_inputs}
+            </form>
+            <script>document.getElementById('finalRegistrationForm').submit();</script>
+          </body>
+        </html>
+        """
+        self.browser_driver.execute_script("document.open(); document.write(arguments[0]); document.close();", html)
+        time.sleep(3)
+        result_html = self.browser_driver.page_source
+        self._save_debug_html("debug_final_registration_browser_response.html", result_html)
+        logger.info("Visible Chrome should now be showing the SIS final schedule/status page.")
+        return result_html
+
     def finalize_registration(self, captcha_text, password):
         """Step 3b: Final Registration (DRY RUN SAFEGUARD)."""
         logger.info("Preparing Final Registration Request...")
@@ -1152,7 +1878,6 @@ class RegistrationClient:
             '__EVENTARGUMENT': '',
             '__VIEWSTATE': self.viewstate,
             '__VIEWSTATEGENERATOR': self.viewstategenerator,
-            '__EVENTVALIDATION': self.eventvalidation,
             'ctl07$HiddenField1': SLOT_TIME_BOUNDS,
             'ctl07$txtEmail': '',
             'ctl07$txtTel': '',
@@ -1163,6 +1888,8 @@ class RegistrationClient:
             'StdSelectedLecs2': self.selected_lectures_str,
             'BData': ''
         }
+        if self.eventvalidation:
+            payload['__EVENTVALIDATION'] = self.eventvalidation
         
         if self.dry_run:
             logger.info("!!! DRY RUN MODE ACTIVE !!!")
@@ -1174,119 +1901,147 @@ class RegistrationClient:
             logger.info("Request NOT sent.")
             return True
         else:
-            logger.info("SENDING REGISTRATION REQUEST...")
-            resp = self.session.post(url, data=payload)
-            if resp.status_code == 200:
-                logger.info("Registration request sent! Check result.")
-                logger.info(resp.text[:500])
-                if "success" in resp.text.lower() or "registered" in resp.text.lower():
-                     logger.info("SUCCESS: Registration likely successful.")
+            if self.browser_driver:
+                result_html = self.submit_payload_in_browser(url, payload)
+                if not result_html:
+                    return False
+                logger.info("Registration request submitted in visible Chrome. Check the browser result.")
+                self.summarize_registration_result(result_html)
+                if "success" in result_html.lower() or "registered" in result_html.lower():
+                    logger.info("SUCCESS: Registration likely successful.")
                 else:
-                     logger.warning("WARNING: Success message not strictly found. Verify manually.")
+                    logger.warning("WARNING: Success message not strictly found. Verify manually in Chrome.")
                 return True
             else:
-                logger.error(f"Registration failed: {resp.status_code}")
-                return False
+                logger.info("SENDING REGISTRATION REQUEST...")
+                resp = self.session.post(url, data=payload)
+                if resp.status_code == 200:
+                    logger.info("Registration request sent! Check result.")
+                    self.summarize_registration_result(resp.text)
+                    if "success" in resp.text.lower() or "registered" in resp.text.lower():
+                         logger.info("SUCCESS: Registration likely successful.")
+                    else:
+                         logger.warning("WARNING: Success message not strictly found. Verify manually.")
+                    return True
+                else:
+                    logger.error(f"Registration failed: {resp.status_code}")
+                    return False
 
-def main():
-    parser = argparse.ArgumentParser(description="SIS Registration Bot")
-    parser.add_argument('--course', type=str, help="Target Course Code")
-    parser.add_argument('--add-section', action='append', help="Add a target section (Format: 'Day Period', e.g. 'Monday 2:3'). Can be used multiple times.")
-    parser.add_argument('-i', '--interactive', action='store_true', help="Choose course and sections from the loaded timetable.")
-    parser.add_argument('--schedule-plan-url', help="Import selected courses from a schedule-plan share URL.")
-    parser.add_argument('--schedule-plan-student-id', help="Import the saved schedule-plan schedule for this student ID.")
-    parser.add_argument('--schedule-plan-name', help="Saved schedule-plan schedule name, if not the default.")
-    parser.add_argument('--remember-credentials', action='store_true', help="Remember Student ID and final SIS password locally. Password is protected with Windows DPAPI.")
-    parser.add_argument('--forget-credentials', action='store_true', help="Delete saved Student ID/password and exit.")
-    parser.add_argument('--gui', action='store_true', help="Open schedule-plan in your browser, then import the finished schedule.")
-    parser.add_argument('--live', action='store_true', help="DISABLE Dry Run (Send real requests)")
-    args = parser.parse_args()
+def collect_cli_options(user_id):
+    print("\nSIS Registration Bot")
+    print("Answer the prompts below. No command-line flags needed.")
+    if len(sys.argv) > 1:
+        print("Note: command-line options are ignored in this interactive version.")
 
-    credential_store = CredentialStore(remember=args.remember_credentials)
-    if args.forget_credentials:
-        credential_store.forget()
-        sys.exit(0)
+    if os.path.exists(CREDENTIALS_FILE):
+        print(f"Saved credentials file: {os.path.abspath(CREDENTIALS_FILE)}")
 
-    use_schedule_plan = bool(args.gui or args.schedule_plan_url or args.schedule_plan_student_id)
-    planned_sections = None
+    mode = prompt_choice(
+        "How do you want to choose sections?",
+        [
+            ("gui", "Open schedule-plan, then import what you picked"),
+            ("saved_schedule", "Import your saved schedule-plan schedule"),
+            ("interactive", "Choose from SIS after login: prompts for course, then section numbers"),
+            ("manual", "Type before login: course code, then filters like Sunday 4-6"),
+        ],
+    )
 
-    if args.gui:
+    options = {
+        "course": None,
+        "specific_sections": [],
+        "interactive": mode == "interactive",
+        "use_schedule_plan": mode in {"gui", "saved_schedule"},
+        "schedule_plan_student_id": user_id,
+        "schedule_plan_name": None,
+        "live": False,
+    }
+
+    if mode == "gui":
         logger.info(f"Opening schedule-plan: {SCHEDULE_PLAN_URL}")
         webbrowser.open(SCHEDULE_PLAN_URL)
         print("\nConfigure your schedule in schedule-plan.")
         print("Save it there, then come back here.")
-        saved_id = input("Enter schedule-plan student ID (press Enter to paste a Share link instead): ").strip()
-        if saved_id:
-            args.schedule_plan_student_id = saved_id
-            maybe_name = input("Enter schedule name if not default (or press Enter): ").strip()
-            if maybe_name:
-                args.schedule_plan_name = maybe_name
-        else:
-            args.schedule_plan_url = input("Paste schedule-plan Share link: ").strip()
+        print(f"The bot will import the saved schedule for Student ID {user_id}.")
+        maybe_name = input("Enter schedule name if not default (or press Enter): ").strip()
+        if maybe_name:
+            options["schedule_plan_name"] = maybe_name
+    elif mode == "saved_schedule":
+        print(f"The bot will import the saved schedule for Student ID {user_id}.")
+        maybe_name = input("Enter schedule name if not default (or press Enter): ").strip()
+        if maybe_name:
+            options["schedule_plan_name"] = maybe_name
+    elif mode == "interactive":
+        print("\nAfter login, the bot will load the SIS timetable.")
+        print("It will prompt: choose a course by number or code, then choose section numbers like 1,3 or 2-4.")
+    elif mode == "manual":
+        while not options["course"]:
+            options["course"] = input("Enter target course code, for example CMPS211: ").strip()
 
-    if use_schedule_plan or args.schedule_plan_url or args.schedule_plan_student_id:
-        try:
-            planned_sections = load_schedule_plan_selections(
-                share_url=args.schedule_plan_url,
-                student_id=args.schedule_plan_student_id,
-                schedule_name=args.schedule_plan_name,
-            )
-        except Exception as exc:
-            logger.error(f"Failed to import schedule-plan schedule: {exc}")
-            sys.exit(1)
-        if args.schedule_plan_url:
-            source_label = "share URL"
-        else:
-            source_label = f"student ID {args.schedule_plan_student_id}"
-            if args.schedule_plan_name:
-                source_label += f" / schedule {args.schedule_plan_name}"
-        log_schedule_plan_preview(planned_sections, source_label)
-        logger.info(f"Imported {len(planned_sections)} selected sections from schedule-plan.")
-        use_schedule_plan = True
+        print("\nAdd section filters one at a time, for example:")
+        print("  Sunday 4-6")
+        print("  Monday 9:10")
+        print("Press Enter on a blank line when you are done.")
+        section_texts = []
+        while True:
+            section_text = input("Section filter: ").strip()
+            if not section_text:
+                break
+            section_texts.append(section_text)
+        options["specific_sections"] = parse_section_targets(section_texts)
+        if not options["specific_sections"]:
+            logger.warning("No section filters entered. The bot will select every SIS section matching that course code.")
+            if not parse_yes_no("Continue with every matching section?", default=False):
+                logger.info("Cancelled before login.")
+                sys.exit(0)
 
-    interactive = args.interactive or (not args.course and not args.add_section and not use_schedule_plan)
-
-    if args.live:
+    options["live"] = parse_yes_no(
+        "Send the real final registration request? Choose No for dry-run.",
+        default=False,
+    )
+    if options["live"]:
         logger.warning("LIVE mode will send the final registration request after captcha/password.")
         if not parse_yes_no("Continue in LIVE mode?", default=False):
             logger.info("Cancelled before login.")
             sys.exit(0)
 
-    if not interactive and not args.course and not use_schedule_plan:
-        logger.error("Please provide --course, or run with --interactive to choose from the timetable.")
-        sys.exit(1)
-    
-    # Parse section targets
-    # input: ["Monday 2:3", "Sunday 4:5"]
-    # output: [("Monday", "2:3"), ("Sunday", "4:5")]
-    specific_sections = []
-    if args.add_section:
-        for s in args.add_section:
-            parts = s.strip().split()
-            if len(parts) >= 2:
-                # "Monday 2:3" -> day="Monday", period="2:3"
-                # If period has spaces? Unlikely based on XML.
-                day = parts[0]
-                period, note = normalize_period_input(parts[1])
-                if note:
-                    logger.info(note)
-                mapped = period_to_time_range(period)
-                if mapped and re.fullmatch(r"\d+:\d+", period):
-                    logger.info(f"Section filter '{day} {period}' maps to actual time {mapped[0]}-{mapped[1]}.")
-                specific_sections.append((day, period))
-            else:
-                logger.warning(f"Invalid section format: '{s}'. Expected 'Day Period'. Ignoring.")
+    return options
+
+
+def main():
+    credential_store = CredentialStore(remember=True)
+    user_id, password = credential_store.ensure_login_credentials()
+    options = collect_cli_options(user_id)
+    planned_sections = None
+
+    if options["use_schedule_plan"]:
+        try:
+            planned_sections = load_schedule_plan_selections(
+                student_id=options["schedule_plan_student_id"],
+                schedule_name=options["schedule_plan_name"],
+            )
+        except Exception as exc:
+            logger.error(f"Failed to import schedule-plan schedule: {exc}")
+            sys.exit(1)
+        source_label = f"student ID {options['schedule_plan_student_id']}"
+        if options["schedule_plan_name"]:
+            source_label += f" / schedule {options['schedule_plan_name']}"
+        log_schedule_plan_preview(planned_sections, source_label)
+        logger.info(f"Imported {len(planned_sections)} selected sections from schedule-plan.")
 
     # 1. Login
-    cookies, std_guid = login_with_selenium()
+    browser_driver = None
+    cookies, std_guid, registration_html, browser_driver = login_with_selenium(user_id, password)
     if not cookies:
         sys.exit(1)
         
     client = RegistrationClient(
         cookies,
         std_guid=std_guid,
-        dry_run=not args.live,
+        dry_run=not options["live"],
         credential_store=credential_store,
+        registration_ready=bool(registration_html),
+        registration_html=registration_html,
+        browser_driver=browser_driver,
     )
     
     # 2. Get Page
@@ -1298,11 +2053,19 @@ def main():
         sys.exit(1)
         
     # 4. Get Timetable & Select
-    if use_schedule_plan:
+    if options["use_schedule_plan"]:
         if not client.get_timetable_and_select_schedule_plan(planned_sections):
             sys.exit(1)
-    elif not client.get_timetable_and_select_course(args.course, specific_sections, interactive=interactive):
+    elif not client.get_timetable_and_select_course(
+        options["course"],
+        options["specific_sections"],
+        interactive=options["interactive"],
+    ):
         sys.exit(1)
+
+    if not client.confirm_selection_before_submit():
+        logger.info("Cancelled before submitting any selected lectures to SIS.")
+        sys.exit(0)
         
     # 5. Submit Selection
     if not client.submit_selection():
@@ -1312,17 +2075,16 @@ def main():
     captcha_text = client.solve_captcha()
     if not captcha_text:
         sys.exit(1)
+
+    if not client.confirm_final_registration_request():
+        logger.info("Cancelled before final registration request.")
+        sys.exit(0)
         
-    saved_password = credential_store.get_password()
-    if saved_password and parse_yes_no("Use saved SIS password for final registration step?", default=True):
-        password = saved_password
-    else:
-        password = getpass.getpass("Enter your SIS Password: ").strip()
-        if args.remember_credentials:
-            credential_store.save_password(password)
-    
     # 7. Finalize
     client.finalize_registration(captcha_text, password)
+
+    if browser_driver:
+        logger.info("Chrome is still open for inspection. Close it manually when you are done.")
 
 if __name__ == "__main__":
     main()

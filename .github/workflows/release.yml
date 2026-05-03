@@ -1,0 +1,71 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'          # triggers on v0.1.0, v1.2.3, etc.
+
+permissions:
+  contents: write     # needed to create GitHub releases
+
+jobs:
+  build-windows-exe:
+    name: Build RegistrationBOT.exe (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller ddddocr
+
+      - name: Build EXE with PyInstaller
+        run: pyinstaller RegistrationBOT.spec
+
+      - name: Verify EXE exists
+        run: |
+          if (!(Test-Path "dist\RegistrationBOT.exe")) {
+            Write-Error "EXE not found after build!"
+            exit 1
+          }
+          Write-Host "EXE size: $((Get-Item 'dist\RegistrationBOT.exe').length / 1MB) MB"
+
+      - name: Bundle release ZIP
+        run: |
+          Copy-Item "dist\RegistrationBOT.exe" "release\RegistrationBOT.exe" -Force
+          Compress-Archive -Force -Path `
+            "release\RegistrationBOT.exe", `
+            ".registration_bot_credentials.example.json", `
+            "README.md" `
+            -DestinationPath "RegistrationBOT-${{ github.ref_name }}-windows.zip"
+
+      - name: Create GitHub Release and upload assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "RegistrationBOT ${{ github.ref_name }}"
+          body: |
+            ## RegistrationBOT ${{ github.ref_name }}
+
+            ### Quick Start (Windows – no Python needed)
+            1. Download **RegistrationBOT-${{ github.ref_name }}-windows.zip** below.
+            2. Extract the ZIP anywhere.
+            3. *(Optional)* Rename `.registration_bot_credentials.example.json` → `.registration_bot_credentials.json` and fill in your credentials so you aren't prompted every run.
+            4. Double-click **RegistrationBOT.exe** (or run it from a terminal).
+
+            ### What's new
+            See the [commit history](../../commits/${{ github.ref_name }}) for details.
+
+            > **Disclaimer:** Use only on accounts you are authorised to access and in compliance with your institution's policies.
+          files: |
+            RegistrationBOT-${{ github.ref_name }}-windows.zip
+          draft: false
+          prerelease: false

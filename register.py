@@ -21,6 +21,18 @@ from urllib.parse import urljoin, urlparse, parse_qs
 from PIL import Image
 from io import BytesIO
 
+# Optional: ddddocr for automatic captcha solving.
+# Install with: pip install ddddocr
+try:
+    import ddddocr as _ddddocr_module
+    _ocr = _ddddocr_module.DdddOcr(show_ad=False)
+    DDDDOCR_AVAILABLE = True
+except Exception:
+    _ocr = None
+    DDDDOCR_AVAILABLE = False
+
+AUTO_CAPTCHA_MAX_RETRIES = 3  # how many times to auto-attempt before asking manually
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -1773,29 +1785,76 @@ class RegistrationClient:
         return True
 
     def solve_captcha(self):
-        """Step 3a: Get captcha image."""
-        img = self.get_captcha_image()
-        if img is None:
-            return None
-        img.show()
+        """Step 3a: Solve captcha – auto first, manual fallback.
 
+        Strategy
+        --------
+        1. Download the captcha image bytes.
+        2. If ddddocr is available, attempt automatic OCR up to
+           AUTO_CAPTCHA_MAX_RETRIES times.  Each failed attempt fetches a
+           *fresh* captcha image from the server (SIS regenerates it on every
+           request), so we don't keep retrying the same image.
+        3. If all auto-attempts fail (or ddddocr is not installed), fall back
+           to showing the image and asking the user to type the answer.
+        """
+        if DDDDOCR_AVAILABLE:
+            logger.info("Attempting automatic captcha solving with ddddocr...")
+            for attempt in range(1, AUTO_CAPTCHA_MAX_RETRIES + 1):
+                img_bytes = self._get_captcha_image_bytes()
+                if img_bytes is None:
+                    logger.warning("Could not download captcha image; falling back to manual input.")
+                    break
+                try:
+                    result = _ocr.classification(img_bytes)
+                    # Strip whitespace; SIS captchas are typically 4-6 alphanumeric chars.
+                    result = (result or "").strip()
+                    if result:
+                        logger.info(f"Auto-captcha attempt {attempt}: got '{result}'")
+                        return result
+                    logger.warning(f"Auto-captcha attempt {attempt}: empty result, retrying...")
+                except Exception as exc:
+                    logger.warning(f"Auto-captcha attempt {attempt} failed with error: {exc}")
+            logger.warning(
+                f"Auto-captcha failed after {AUTO_CAPTCHA_MAX_RETRIES} attempts. "
+                "Falling back to manual input."
+            )
+        else:
+            logger.info(
+                "ddddocr is not installed. Install it with: pip install ddddocr\n"
+                "Falling back to manual captcha input."
+            )
+
+        # --- Manual fallback ---
+        img_bytes = self._get_captcha_image_bytes()
+        if img_bytes is None:
+            return None
+        img = Image.open(BytesIO(img_bytes))
+        img.show()
         captcha_text = input("Enter Captcha Text: ").strip()
         return captcha_text
 
-    def get_captcha_image(self):
-        """Download the captcha image from the final page."""
-        # Find captcha GUID
-        # Pattern: CaptchaImage.aspx?guid=...
-        captcha_img = self.final_soup.find('img', src=re.compile(r'CaptchaImage\.aspx'))
-        if not captcha_img:
+    def _get_captcha_image_bytes(self):
+        """Download the captcha image and return raw bytes (or None on failure)."""
+        captcha_img_tag = self.final_soup.find('img', src=re.compile(r'CaptchaImage\.aspx'))
+        if not captcha_img_tag:
             logger.error("Captcha image not found on final page!")
             return None
-            
-        captcha_url = urljoin(urljoin(BASE_URL, "/SIS/Modules/"), captcha_img['src'])
+        captcha_url = urljoin(urljoin(BASE_URL, "/SIS/Modules/"), captcha_img_tag['src'])
         logger.info(f"Downloading Captcha: {captcha_url}")
-        
-        resp = self.session.get(captcha_url)
-        return Image.open(BytesIO(resp.content))
+        try:
+            resp = self.session.get(captcha_url)
+            resp.raise_for_status()
+            return resp.content
+        except Exception as exc:
+            logger.error(f"Failed to download captcha image: {exc}")
+            return None
+
+    def get_captcha_image(self):
+        """Download the captcha image from the final page (PIL Image)."""
+        img_bytes = self._get_captcha_image_bytes()
+        if img_bytes is None:
+            return None
+        return Image.open(BytesIO(img_bytes))
 
     @staticmethod
     def _extract_course_codes_from_text(text):

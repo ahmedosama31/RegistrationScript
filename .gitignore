@@ -27,6 +27,6 @@ debug_*.xml
 # Build/release artifacts
 build/
 dist/
-*.spec
+!RegistrationBOT.spec
 release/
 *.zip

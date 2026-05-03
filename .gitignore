@@ -23,3 +23,10 @@ debug_*.xml
 *.log
 *.html
 *_analysis.txt
+
+# Build/release artifacts
+build/
+dist/
+*.spec
+release/
+*.zip

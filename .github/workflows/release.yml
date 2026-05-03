@@ -41,9 +41,8 @@ jobs:
 
       - name: Bundle release ZIP
         run: |
-          Copy-Item "dist\RegistrationBOT.exe" "release\RegistrationBOT.exe" -Force
           Compress-Archive -Force -Path `
-            "release\RegistrationBOT.exe", `
+            "dist\RegistrationBOT.exe", `
             ".registration_bot_credentials.example.json", `
             "README.md" `
             -DestinationPath "RegistrationBOT-${{ github.ref_name }}-windows.zip"

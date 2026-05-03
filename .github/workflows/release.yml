@@ -9,8 +9,9 @@ permissions:
   contents: write     # needed to create GitHub releases
 
 jobs:
-  build-windows-exe:
-    name: Build RegistrationBOT.exe (Windows)
+  # ── Full build: includes ddddocr + onnxruntime for auto CAPTCHA solving ──────
+  build-full:
+    name: Build Full (with auto-CAPTCHA)
     runs-on: windows-latest
 
     steps:
@@ -22,13 +23,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install dependencies (full)
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller ddddocr
 
-      - name: Build EXE with PyInstaller
+      - name: Build EXE (full)
         run: pyinstaller RegistrationBOT.spec
 
       - name: Verify EXE exists
@@ -39,7 +40,7 @@ jobs:
           }
           Write-Host "EXE size: $((Get-Item 'dist\RegistrationBOT.exe').length / 1MB) MB"
 
-      - name: Bundle release ZIP
+      - name: Bundle full ZIP
         run: |
           Compress-Archive -Force -Path `
             "dist\RegistrationBOT.exe", `
@@ -47,18 +48,92 @@ jobs:
             "README.md" `
             -DestinationPath "RegistrationBOT-${{ github.ref_name }}-windows.zip"
 
-      - name: Create GitHub Release and upload assets
+      - name: Upload full ZIP as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-zip
+          path: RegistrationBOT-${{ github.ref_name }}-windows.zip
+
+  # ── Lite build: no ddddocr/onnxruntime, much smaller, manual CAPTCHA only ───
+  build-lite:
+    name: Build Lite (manual CAPTCHA, smaller)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies (lite – no ddddocr)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build EXE (lite)
+        run: pyinstaller RegistrationBOT-lite.spec
+
+      - name: Verify EXE exists
+        run: |
+          if (!(Test-Path "dist\RegistrationBOT-lite.exe")) {
+            Write-Error "Lite EXE not found after build!"
+            exit 1
+          }
+          Write-Host "Lite EXE size: $((Get-Item 'dist\RegistrationBOT-lite.exe').length / 1MB) MB"
+
+      - name: Bundle lite ZIP
+        run: |
+          Compress-Archive -Force -Path `
+            "dist\RegistrationBOT-lite.exe", `
+            ".registration_bot_credentials.example.json", `
+            "README.md" `
+            -DestinationPath "RegistrationBOT-${{ github.ref_name }}-windows-lite.zip"
+
+      - name: Upload lite ZIP as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lite-zip
+          path: RegistrationBOT-${{ github.ref_name }}-windows-lite.zip
+
+  # ── Publish: create one GitHub Release with both ZIPs attached ───────────────
+  publish:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-full, build-lite]
+
+    steps:
+      - name: Download full ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: full-zip
+
+      - name: Download lite ZIP
+        uses: actions/download-artifact@v4
+        with:
+          name: lite-zip
+
+      - name: Create GitHub Release and upload both ZIPs
         uses: softprops/action-gh-release@v2
         with:
           name: "RegistrationBOT ${{ github.ref_name }}"
           body: |
             ## RegistrationBOT ${{ github.ref_name }}
 
+            ### Which download should I pick?
+
+            | File | Size | Auto-CAPTCHA | Notes |
+            |---|---|---|---|
+            | `RegistrationBOT-${{ github.ref_name }}-windows.zip` | ~100 MB | ✅ Yes (ddddocr) | Recommended – solves CAPTCHAs automatically |
+            | `RegistrationBOT-${{ github.ref_name }}-windows-lite.zip` | ~20–30 MB | ❌ No | You'll be prompted to type the CAPTCHA manually |
+
             ### Quick Start (Windows – no Python needed)
-            1. Download **RegistrationBOT-${{ github.ref_name }}-windows.zip** below.
-            2. Extract the ZIP anywhere.
-            3. *(Optional)* Rename `.registration_bot_credentials.example.json` → `.registration_bot_credentials.json` and fill in your credentials so you aren't prompted every run.
-            4. Double-click **RegistrationBOT.exe** (or run it from a terminal).
+            1. Download your preferred ZIP above and extract it anywhere.
+            2. *(Optional)* Rename `.registration_bot_credentials.example.json` → `.registration_bot_credentials.json` and fill in your credentials so you aren't prompted every run.
+            3. Double-click the `.exe` (or run it from a terminal).
 
             ### What's new
             See the [commit history](../../commits/${{ github.ref_name }}) for details.
@@ -66,5 +141,6 @@ jobs:
             > **Disclaimer:** Use only on accounts you are authorised to access and in compliance with your institution's policies.
           files: |
             RegistrationBOT-${{ github.ref_name }}-windows.zip
+            RegistrationBOT-${{ github.ref_name }}-windows-lite.zip
           draft: false
           prerelease: false

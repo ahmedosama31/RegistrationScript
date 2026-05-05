@@ -1,9 +1,18 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
 import ddddocr
+import selenium
 
 # Locate the ddddocr package directory so we can bundle its model file.
 _ddddocr_dir = os.path.dirname(ddddocr.__file__)
+_selenium_dir = os.path.dirname(selenium.__file__)
+_selenium_manager = os.path.join(
+    _selenium_dir,
+    'webdriver',
+    'common',
+    'windows',
+    'selenium-manager.exe',
+)
 
 a = Analysis(
     ['register.py'],
@@ -12,12 +21,17 @@ a = Analysis(
     datas=[
         # Bundle the ddddocr ONNX model and any other data files it ships with.
         (_ddddocr_dir, 'ddddocr'),
+        (_selenium_manager, 'selenium/webdriver/common/windows'),
     ],
     hiddenimports=[
         'ddddocr',
         'onnxruntime',
         'PIL',
         'PIL.Image',
+        'selenium.webdriver.chrome.webdriver',
+        'selenium.webdriver.chrome.service',
+        'selenium.webdriver.common.selenium_manager',
+        'webdriver_manager.chrome',
     ],
     hookspath=[],
     hooksconfig={},

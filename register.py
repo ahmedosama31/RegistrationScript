@@ -9,6 +9,7 @@ import ctypes
 import getpass
 import webbrowser
 import html as html_lib
+import traceback
 import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -16,7 +17,10 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from webdriver_manager.chrome import ChromeDriverManager
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+except Exception:
+    ChromeDriverManager = None
 from urllib.parse import urljoin, urlparse, parse_qs
 from PIL import Image
 from io import BytesIO
@@ -51,6 +55,10 @@ CAPTCHA_PATH = "/SIS/Modules/CaptchaImage.aspx"
 SCHEDULE_PLAN_URL = "https://schedule-plan.pages.dev/"
 SCHEDULE_PLAN_API_BASE = "https://schedule-plan.pages.dev/api"
 REGISTRATION_CHECK_INTERVAL_SECONDS = 5
+CHROME_BINARY_CANDIDATES = [
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+]
 
 # Optional local fallback if dynamic extraction fails.
 # Keep empty in shared code; provide interactively when prompted.
@@ -250,6 +258,14 @@ def parse_yes_no(prompt, default=False):
     if not answer:
         return default
     return answer in {"y", "yes"}
+
+
+def pause_if_frozen(message="Press Enter to close..."):
+    if getattr(sys, "frozen", False):
+        try:
+            input(message)
+        except Exception:
+            pass
 
 
 def prompt_choice(prompt, choices):
@@ -860,11 +876,69 @@ def wait_for_registration_to_open_in_browser(driver):
         time.sleep(REGISTRATION_CHECK_INTERVAL_SECONDS)
 
 
+def find_chrome_binary():
+    """Return a Chrome executable path from env/standard Windows locations, if available."""
+    env_path = os.environ.get("CHROME_BINARY") or os.environ.get("GOOGLE_CHROME_BIN")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    for path in CHROME_BINARY_CANDIDATES:
+        if os.path.exists(path):
+            return path
+
+    return None
+
+
+def build_chrome_options():
+    options = webdriver.ChromeOptions()
+    chrome_binary = find_chrome_binary()
+    if chrome_binary:
+        options.binary_location = chrome_binary
+        logger.info(f"Using Chrome binary: {chrome_binary}")
+    else:
+        logger.info("Chrome binary was not found in the standard install paths; Selenium will try auto-detection.")
+
+    options.add_argument("--disable-extensions")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    return options
+
+
+def launch_visible_chrome():
+    """Launch Chrome for SIS login, with packaged-exe friendly fallbacks."""
+    options = build_chrome_options()
+    errors = []
+
+    try:
+        logger.info("Starting Chrome with Selenium Manager...")
+        return webdriver.Chrome(options=options)
+    except Exception as exc:
+        errors.append(f"Selenium Manager: {exc}")
+        logger.warning(f"Selenium Manager could not start Chrome: {exc}")
+
+    if ChromeDriverManager is not None:
+        try:
+            logger.info("Starting Chrome with webdriver-manager fallback...")
+            return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        except Exception as exc:
+            errors.append(f"webdriver-manager: {exc}")
+            logger.warning(f"webdriver-manager could not start Chrome: {exc}")
+    else:
+        errors.append("webdriver-manager is not bundled/installed")
+
+    logger.error("Could not launch Chrome.")
+    logger.error("Make sure Google Chrome is installed, then run this exe from a normal folder such as Desktop or Downloads.")
+    logger.error("If Chrome is installed somewhere custom, set CHROME_BINARY to the full chrome.exe path and run again.")
+    logger.error("Browser startup errors: " + " | ".join(errors))
+    return None
+
+
 def login_with_selenium(user_id, password):
     """Use Selenium to handle login and extract session cookies."""
     logger.info("Launching visible Selenium Chrome for login and registration-open checking...")
-    options = webdriver.ChromeOptions()
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    driver = launch_visible_chrome()
+    if driver is None:
+        return None, None, None, None
     
     try:
         driver.get(BASE_URL)
@@ -2139,6 +2213,7 @@ def main():
     browser_driver = None
     cookies, std_guid, registration_html, browser_driver = login_with_selenium(user_id, password)
     if not cookies:
+        pause_if_frozen("Login/browser startup failed. Press Enter to close...")
         sys.exit(1)
         
     client = RegistrationClient(
@@ -2184,7 +2259,7 @@ def main():
         sys.exit(0)
 
     MAX_CAPTCHA_ATTEMPTS = 5
-    AUTO_SOLVE_ATTEMPTS  = 2   # switch to manual input after this many failures
+    AUTO_SOLVE_ATTEMPTS = AUTO_CAPTCHA_MAX_RETRIES
 
     for captcha_attempt in range(1, MAX_CAPTCHA_ATTEMPTS + 1):
         use_manual = captcha_attempt > AUTO_SOLVE_ATTEMPTS
@@ -2220,4 +2295,19 @@ def main():
         logger.info("Chrome is still open for inspection. Close it manually when you are done.")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        logger.info("Cancelled by user.")
+        pause_if_frozen("Cancelled. Press Enter to close...")
+        raise SystemExit(130)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+        if code:
+            pause_if_frozen("The bot stopped because of an error. Press Enter to close...")
+        raise
+    except Exception:
+        logger.error("Unexpected crash:")
+        traceback.print_exc()
+        pause_if_frozen("Unexpected crash. Press Enter to close...")
+        raise SystemExit(1)

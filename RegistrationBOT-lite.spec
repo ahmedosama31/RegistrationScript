@@ -1,13 +1,30 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
+import selenium
+
+_selenium_dir = os.path.dirname(selenium.__file__)
+_selenium_manager = os.path.join(
+    _selenium_dir,
+    'webdriver',
+    'common',
+    'windows',
+    'selenium-manager.exe',
+)
 
 a = Analysis(
     ['register.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[
+        (_selenium_manager, 'selenium/webdriver/common/windows'),
+    ],
     hiddenimports=[
         'PIL',
         'PIL.Image',
+        'selenium.webdriver.chrome.webdriver',
+        'selenium.webdriver.chrome.service',
+        'selenium.webdriver.common.selenium_manager',
+        'webdriver_manager.chrome',
     ],
     hookspath=[],
     hooksconfig={},

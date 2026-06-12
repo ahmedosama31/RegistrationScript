@@ -38,30 +38,19 @@ Run the script:
 python register.py
 ```
 
-The script is now an interactive CLI. It asks what you want to do instead of requiring command-line flags.
+The script is now an interactive CLI. It asks what you want to do instead of requiring command-line flags. In modern Windows terminals, menus and confirmations use colors plus Up/Down arrow selection. If the terminal does not support that, the script falls back to typed input.
 
 You can choose from:
 
 - Open [schedule-plan](https://schedule-plan.pages.dev/), then import what you picked.
 - Import a saved schedule-plan schedule by student ID.
-- Choose from SIS after login.
 - Type a course code and section filters before login.
 
-### Choosing from SIS after login
-
-This option logs you in first, loads the SIS timetable, then prompts you with a numbered course list:
-
-```text
-Choose a course by number or type a course code:
-```
-
-After you pick the course, it shows the matching sections and prompts:
-
-```text
-Choose section numbers (example: 1,3 or 2-4):
-```
-
-Use this when you do not want to type course/section details before seeing what SIS currently has.
+The script is designed for the registration-opening moment: choose or import the
+schedule first, confirm the plan, then let visible Chrome log in and keep checking
+until registration opens. The bot will not start the registration-open polling loop
+until after the pre-open confirmations are complete. While waiting, it checks about
+once per second.
 
 ### Typing course and filters before login
 
@@ -74,11 +63,17 @@ Section filter:
 
 Enter one section filter per line, such as `Sunday 4-6` or `Monday 9:10`, then press Enter on a blank line when done. Use this when you already know the exact course and section times.
 
-Dry-run is the default and recommended first. When asked:
-
-"Send the real final registration request? Choose No for dry-run."
-
-answer `n` or just press Enter. To actually submit registration, answer `y`; the script asks for a second confirmation before continuing.
+Dry-run is the default and recommended first. For Yes/No confirmations, use the
+Up/Down arrows to highlight Yes or No, then press Enter. You can also press `y`
+or `n` directly. For numbered menus, use Up/Down and Enter or press the number.
+When asked "Send the real final registration request? Choose No for dry-run.",
+choose No for a dry run. To actually submit registration, choose Yes; the script
+asks for a second confirmation before continuing.
+Before opening SIS, it also shows a pre-open plan review and asks you to confirm
+the exact schedule plan, confirm that visible Chrome should start waiting, and,
+in live mode, confirm live mode again. After registration opens, the script maps
+your planned sections to SIS, prints the final selected sections and raw payload
+string, then asks again before submitting anything.
 
 The first time you run the CLI, it asks for your SIS Student ID and password. It saves them in `.registration_bot_credentials.json`, which is an editable JSON file ignored by git. After that, the bot reuses those credentials until you edit the file. Keep that file private because it contains your password.
 
@@ -98,7 +93,7 @@ The script logs both SIS slot and real time (example: `9:10 (4:00-5:50)`).
 - No password is stored in source code.
 - Student GUID/stdid is auto-detected after login when possible.
 - If auto-detection fails, the script asks for manual input.
-- If SIS says registration is closed, the script uses visible Chrome to press "Check if it is open now" or refresh until the timetable page becomes visible. Press `Ctrl+C` to cancel the wait.
+- If SIS says registration is closed, the script keeps visible Chrome open in front of you and presses "Check if it is open now" or refreshes until the timetable page becomes visible. Press `Ctrl+C` to cancel the wait.
 - Existing SIS selections are always preserved in the final selection payload so the bot does not deselect courses you already had selected.
 - Optional per-user `force_preserve_course_codes` can be added to `.registration_bot_credentials.json` for courses SIS shows as visually selected while the timetable XML reports `Selected="0"`.
 - After the final registration request, the script saves the SIS result page to `debug_final_registration_response.html` and prints whether course codes appear in the returned schedule/status text.

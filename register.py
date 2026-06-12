@@ -48,13 +48,68 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+ANSI_ENABLED = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+if ANSI_ENABLED and os.name == "nt":
+    try:
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.GetStdHandle(-11)
+        mode = ctypes.c_uint32()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+    except Exception:
+        ANSI_ENABLED = False
+
+STYLE = {
+    "reset": "\033[0m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "cyan": "\033[36m",
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "red": "\033[31m",
+    "blue": "\033[34m",
+}
+
+
+def style(text, *names):
+    if not ANSI_ENABLED:
+        return str(text)
+    prefix = "".join(STYLE[name] for name in names if name in STYLE)
+    return f"{prefix}{text}{STYLE['reset']}" if prefix else str(text)
+
+
+def ui_header(title):
+    print()
+    print(style("=" * 72, "cyan"))
+    print(style(title, "bold", "cyan"))
+    print(style("=" * 72, "cyan"))
+
+
+def ui_subheader(title):
+    print()
+    print(style(title, "bold", "blue"))
+    print(style("-" * len(title), "blue"))
+
+
+def ui_label(label, value, color="green"):
+    print(f"{style(label + ':', 'bold', color)} {value}")
+
+
+def ui_note(text):
+    print(style(text, "dim"))
+
+
+def ui_item(text, color=None):
+    print(f"  - {style(text, color) if color else text}")
+
+
 BASE_URL = "https://std.eng.cu.edu.eg"
 REGISTRATION_PATH = "/SIS/Modules/MetaLoader.aspx?path=~/SIS/Modules/Student/Registration/Registration.ascx"
 XML_HANDLER_PATH = "/SIS/Modules/MyXMLHandler.ashx"
 CAPTCHA_PATH = "/SIS/Modules/CaptchaImage.aspx"
 SCHEDULE_PLAN_URL = "https://schedule-plan.pages.dev/"
 SCHEDULE_PLAN_API_BASE = "https://schedule-plan.pages.dev/api"
-REGISTRATION_CHECK_INTERVAL_SECONDS = 5
+REGISTRATION_CHECK_INTERVAL_SECONDS = 1
 CHROME_BINARY_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -252,9 +307,121 @@ def normalize_course_code(code):
     return re.sub(r"[^A-Z0-9]", "", (code or "").upper())
 
 
+def _read_windows_menu_key():
+    """Read a single Windows console key, normalizing arrow keys."""
+    import msvcrt
+
+    key = msvcrt.getwch()
+    if key in ("\x00", "\xe0"):
+        arrow = msvcrt.getwch()
+        if arrow == "H":
+            return "up"
+        if arrow == "P":
+            return "down"
+        return None
+    if key in ("\r", "\n"):
+        return "enter"
+    if key == "\x03":
+        raise KeyboardInterrupt
+    lowered = key.lower()
+    if lowered in {"y", "n"}:
+        return lowered
+    if key.isdigit():
+        return key
+    return None
+
+
+def _print_yes_no_options(labels, selected, redraw=False):
+    if redraw:
+        sys.stdout.write("\x1b[2F")
+    for idx, label in enumerate(labels):
+        marker = ">" if idx == selected else " "
+        color = "green" if label == "Yes" else "red"
+        line = f"  {marker} {label}"
+        if idx == selected:
+            line = style(line, "bold", color)
+        else:
+            line = style(line, "dim")
+        sys.stdout.write(f"{line}   \n")
+    sys.stdout.flush()
+
+
+def _select_yes_no_with_arrows(prompt, default=False):
+    labels = ["Yes", "No"]
+    selected = 0 if default else 1
+
+    print()
+    print(style(prompt, "bold", "yellow"))
+    ui_note("Use Up/Down arrows, then Enter. You can also press Y or N.")
+    _print_yes_no_options(labels, selected)
+
+    while True:
+        key = _read_windows_menu_key()
+        if key in {"up", "down"}:
+            selected = 1 - selected
+            _print_yes_no_options(labels, selected, redraw=True)
+        elif key == "y":
+            print(style("Selected: Yes", "bold", "green"))
+            return True
+        elif key == "n":
+            print(style("Selected: No", "bold", "red"))
+            return False
+        elif key == "enter":
+            color = "green" if selected == 0 else "red"
+            print(style(f"Selected: {labels[selected]}", "bold", color))
+            return selected == 0
+
+
+def _print_choice_options(choices, selected, redraw=False):
+    if redraw:
+        sys.stdout.write(f"\x1b[{len(choices)}F")
+    for idx, (_, label) in enumerate(choices):
+        marker = ">" if idx == selected else " "
+        number = f"{idx + 1}."
+        line = f"  {marker} {number} {label}"
+        if idx == selected:
+            line = style(line, "bold", "cyan")
+        else:
+            line = style(line, "dim")
+        sys.stdout.write(f"{line}   \n")
+    sys.stdout.flush()
+
+
+def _select_choice_with_arrows(prompt, choices):
+    selected = 0
+    ui_subheader(prompt)
+    ui_note("Use Up/Down arrows, then Enter. You can also press a number.")
+    _print_choice_options(choices, selected)
+
+    while True:
+        key = _read_windows_menu_key()
+        if key == "up":
+            selected = (selected - 1) % len(choices)
+            _print_choice_options(choices, selected, redraw=True)
+        elif key == "down":
+            selected = (selected + 1) % len(choices)
+            _print_choice_options(choices, selected, redraw=True)
+        elif key == "enter":
+            print(style(f"Selected: {choices[selected][1]}", "bold", "green"))
+            return choices[selected][0]
+        elif key and key.isdigit():
+            idx = int(key)
+            if 1 <= idx <= len(choices):
+                print(style(f"Selected: {choices[idx - 1][1]}", "bold", "green"))
+                return choices[idx - 1][0]
+
+
 def parse_yes_no(prompt, default=False):
+    if os.name == "nt" and sys.stdin.isatty() and ANSI_ENABLED:
+        try:
+            return _select_yes_no_with_arrows(prompt, default=default)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            logger.warning(f"Arrow-key prompt unavailable; falling back to typed yes/no: {exc}")
+
     suffix = " [Y/n]: " if default else " [y/N]: "
-    answer = input(prompt + suffix).strip().lower()
+    answer = input(style(prompt + suffix, "bold", "yellow")).strip().lower()
     if not answer:
         return default
     return answer in {"y", "yes"}
@@ -270,18 +437,25 @@ def pause_if_frozen(message="Press Enter to close..."):
 
 def prompt_choice(prompt, choices):
     """Show a numbered menu and return the selected choice key."""
-    print()
-    print(prompt)
+    if os.name == "nt" and sys.stdin.isatty() and ANSI_ENABLED:
+        try:
+            return _select_choice_with_arrows(prompt, choices)
+        except KeyboardInterrupt:
+            raise
+        except Exception as exc:
+            logger.warning(f"Arrow-key menu unavailable; falling back to typed choice: {exc}")
+
+    ui_subheader(prompt)
     for idx, (_, label) in enumerate(choices, start=1):
-        print(f"  {idx}. {label}")
+        print(f"  {style(str(idx) + '.', 'bold', 'cyan')} {label}")
 
     while True:
-        raw = input("Choose an option: ").strip()
+        raw = input(style("Choose an option: ", "bold", "yellow")).strip()
         if raw.isdigit():
             idx = int(raw)
             if 1 <= idx <= len(choices):
                 return choices[idx - 1][0]
-        print(f"Please enter a number from 1 to {len(choices)}.")
+        print(style(f"Please enter a number from 1 to {len(choices)}.", "red"))
 
 
 def parse_number_list(raw, max_value):
@@ -911,7 +1085,12 @@ def launch_visible_chrome():
 
     try:
         logger.info("Starting Chrome with Selenium Manager...")
-        return webdriver.Chrome(options=options)
+        driver = webdriver.Chrome(options=options)
+        try:
+            driver.maximize_window()
+        except Exception:
+            logger.info("Chrome started, but the window could not be maximized automatically.")
+        return driver
     except Exception as exc:
         errors.append(f"Selenium Manager: {exc}")
         logger.warning(f"Selenium Manager could not start Chrome: {exc}")
@@ -919,7 +1098,12 @@ def launch_visible_chrome():
     if ChromeDriverManager is not None:
         try:
             logger.info("Starting Chrome with webdriver-manager fallback...")
-            return webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+            driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+            try:
+                driver.maximize_window()
+            except Exception:
+                logger.info("Chrome started, but the window could not be maximized automatically.")
+            return driver
         except Exception as exc:
             errors.append(f"webdriver-manager: {exc}")
             logger.warning(f"webdriver-manager could not start Chrome: {exc}")
@@ -933,9 +1117,9 @@ def launch_visible_chrome():
     return None
 
 
-def login_with_selenium(user_id, password):
+def login_with_selenium(user_id, password, wait_for_registration=False):
     """Use Selenium to handle login and extract session cookies."""
-    logger.info("Launching visible Selenium Chrome for login and registration-open checking...")
+    logger.info("Launching visible Selenium Chrome for login.")
     driver = launch_visible_chrome()
     if driver is None:
         return None, None, None, None
@@ -970,7 +1154,9 @@ def login_with_selenium(user_id, password):
         )
         logger.info("Login detected.")
 
-        registration_html = wait_for_registration_to_open_in_browser(driver)
+        registration_html = None
+        if wait_for_registration:
+            registration_html = wait_for_registration_to_open_in_browser(driver)
 
         logger.info("Extracting cookies from visible Chrome...")
         selenium_cookies = driver.get_cookies()
@@ -1682,58 +1868,62 @@ class RegistrationClient:
         return True
 
     def confirm_selection_before_submit(self):
-        print("\nReview final SIS selection before anything is submitted:")
-        print("\nAlready selected in SIS and preserved:")
+        ui_header("Review Final SIS Selection")
+        ui_note("Nothing is submitted until you confirm this screen.")
+
+        ui_subheader("Already Selected In SIS And Preserved")
         if self.existing_selected_details:
             for lec in self.existing_selected_details:
-                print("  - " + self.format_lecture_line(lec))
+                ui_item(self.format_lecture_line(lec), "green")
         else:
-            print("  - None detected")
+            ui_item("None detected", "dim")
 
-        print("\nForce-preserved because SIS can show it visually selected while XML says Selected=0:")
+        ui_subheader("Force-Preserved")
+        ui_note("Used when SIS can show a section visually selected while XML says Selected=0.")
         if self.force_preserved_details:
             for lec in self.force_preserved_details:
-                print("  - " + self.format_lecture_line(lec))
+                ui_item(self.format_lecture_line(lec), "yellow")
         else:
-            print("  - None")
+            ui_item("None", "dim")
 
-        print("\nNew selections to add:")
+        ui_subheader("New Selections To Add")
         if self.new_selected_details:
             for lec in self.new_selected_details:
-                print("  - " + self.format_lecture_line(lec))
+                ui_item(self.format_lecture_line(lec), "cyan")
         else:
-            print("  - None")
+            ui_item("None", "dim")
 
-        print("\nFinal schedule payload includes:")
+        ui_subheader("Final Schedule Payload Includes")
         if self.selected_lecture_details:
             for lec in self.selected_lecture_details:
-                print("  - " + self.format_lecture_line(lec))
+                ui_item(self.format_lecture_line(lec), "green")
         else:
-            print("  - None")
+            ui_item("None", "dim")
 
         if self.force_preserve_course_codes:
-            print("\nConfigured force-preservation checks:")
+            ui_subheader("Configured Force-Preservation Checks")
             for code in sorted(self.force_preserve_course_codes):
                 preserved = any(
                     normalize_course_code(lec["code"]) == code
                     for lec in self.existing_selected_details + self.force_preserved_details
                 )
-                print(f"  - {code}: {'YES, included in final payload' if preserved else 'NO, not found to preserve'}")
-        print(f"Raw selection string that will be sent: {self.selected_lectures_str}")
+                status = "YES, included in final payload" if preserved else "NO, not found to preserve"
+                ui_item(f"{code}: {status}", "green" if preserved else "red")
+        ui_label("Raw selection string that will be sent", self.selected_lectures_str, "yellow")
 
         return parse_yes_no("\nSubmit this selection to SIS?", default=False)
 
     def confirm_final_registration_request(self):
-        print("\nFinal registration request review:")
-        print("These sections are still in the final selection string:")
+        ui_header("Final Registration Request Review")
+        ui_subheader("Sections Still In Final Selection String")
         if self.selected_lecture_details:
             for lec in self.selected_lecture_details:
-                print("  - " + self.format_lecture_line(lec))
+                ui_item(self.format_lecture_line(lec), "green")
         else:
-            print("  - None")
-        print(f"Raw selection string: {self.selected_lectures_str}")
+            ui_item("None", "dim")
+        ui_label("Raw selection string", self.selected_lectures_str, "yellow")
         if self.dry_run:
-            print("Dry-run is ON, so the final registration request will not actually be sent.")
+            print(style("Dry-run is ON, so the final registration request will not actually be sent.", "bold", "green"))
             return True
         return parse_yes_no("\nSend the final LIVE registration request now?", default=False)
 
@@ -2109,20 +2299,19 @@ class RegistrationClient:
         )
 
 def collect_cli_options(user_id):
-    print("\nSIS Registration Bot")
-    print("Answer the prompts below. No command-line flags needed.")
+    ui_header("SIS Registration Bot")
+    ui_note("Answer the prompts below. No command-line flags needed.")
     if len(sys.argv) > 1:
-        print("Note: command-line options are ignored in this interactive version.")
+        print(style("Note: command-line options are ignored in this interactive version.", "yellow"))
 
     if os.path.exists(CREDENTIALS_FILE):
-        print(f"Saved credentials file: {os.path.abspath(CREDENTIALS_FILE)}")
+        ui_label("Saved credentials file", os.path.abspath(CREDENTIALS_FILE), "green")
 
     mode = prompt_choice(
         "How do you want to choose sections?",
         [
             ("gui", "Open schedule-plan, then import what you picked"),
             ("saved_schedule", "Import your saved schedule-plan schedule"),
-            ("interactive", "Choose from SIS after login: prompts for course, then section numbers"),
             ("manual", "Type before login: course code, then filters like Sunday 4-6"),
         ],
     )
@@ -2130,41 +2319,42 @@ def collect_cli_options(user_id):
     options = {
         "course": None,
         "specific_sections": [],
-        "interactive": mode == "interactive",
+        "interactive": False,
         "use_schedule_plan": mode in {"gui", "saved_schedule"},
         "schedule_plan_student_id": user_id,
         "schedule_plan_name": None,
+        "schedule_source": mode,
         "live": False,
     }
 
     if mode == "gui":
         logger.info(f"Opening schedule-plan: {SCHEDULE_PLAN_URL}")
         webbrowser.open(SCHEDULE_PLAN_URL)
-        print("\nConfigure your schedule in schedule-plan.")
-        print("Save it there, then come back here.")
-        print(f"The bot will import the saved schedule for Student ID {user_id}.")
-        maybe_name = input("Enter schedule name if not default (or press Enter): ").strip()
+        ui_subheader("Schedule-Plan Setup")
+        ui_item("Configure your schedule in schedule-plan.")
+        ui_item("Save it there, then come back here.")
+        ui_label("Student ID used for import", user_id, "green")
+        maybe_name = input(style("Enter schedule name if not default (or press Enter): ", "bold", "yellow")).strip()
         if maybe_name:
             options["schedule_plan_name"] = maybe_name
+        input(style("Press Enter only after you have saved the schedule in schedule-plan...", "bold", "yellow"))
     elif mode == "saved_schedule":
-        print(f"The bot will import the saved schedule for Student ID {user_id}.")
-        maybe_name = input("Enter schedule name if not default (or press Enter): ").strip()
+        ui_subheader("Saved Schedule Import")
+        ui_label("Student ID used for import", user_id, "green")
+        maybe_name = input(style("Enter schedule name if not default (or press Enter): ", "bold", "yellow")).strip()
         if maybe_name:
             options["schedule_plan_name"] = maybe_name
-    elif mode == "interactive":
-        print("\nAfter login, the bot will load the SIS timetable.")
-        print("It will prompt: choose a course by number or code, then choose section numbers like 1,3 or 2-4.")
     elif mode == "manual":
         while not options["course"]:
-            options["course"] = input("Enter target course code, for example CMPS211: ").strip()
+            options["course"] = input(style("Enter target course code, for example CMPS211: ", "bold", "yellow")).strip()
 
-        print("\nAdd section filters one at a time, for example:")
-        print("  Sunday 4-6")
-        print("  Monday 9:10")
-        print("Press Enter on a blank line when you are done.")
+        ui_subheader("Manual Section Filters")
+        ui_note("Add section filters one at a time, then press Enter on a blank line when done.")
+        ui_item("Example: Sunday 4-6")
+        ui_item("Example: Monday 9:10")
         section_texts = []
         while True:
-            section_text = input("Section filter: ").strip()
+            section_text = input(style("Section filter: ", "bold", "yellow")).strip()
             if not section_text:
                 break
             section_texts.append(section_text)
@@ -2188,6 +2378,53 @@ def collect_cli_options(user_id):
     return options
 
 
+def confirm_pre_open_plan(options, planned_sections=None):
+    """Lock the user's intent before the bot starts checking whether registration is open."""
+    ui_header("Pre-Open Plan Review")
+    ui_note("The bot will not start checking registration until you confirm this plan.")
+
+    if options["use_schedule_plan"]:
+        source = "saved schedule-plan schedule"
+        if options["schedule_source"] == "gui":
+            source = "schedule-plan after you configured and saved it"
+        ui_label("Schedule source", source, "cyan")
+        ui_label("Student ID used for import", options["schedule_plan_student_id"], "green")
+        if options["schedule_plan_name"]:
+            ui_label("Schedule name", options["schedule_plan_name"], "green")
+        ui_label("Imported sections", len(planned_sections or []), "green")
+        if planned_sections:
+            ui_subheader("Imported Sections")
+            for idx, section in enumerate(planned_sections, start=1):
+                print(f"  {style(str(idx) + '.', 'bold', 'cyan')} {format_schedule_plan_section(section)}")
+    else:
+        ui_label("Schedule source", "typed before login", "cyan")
+        ui_label("Course code", options["course"], "green")
+        if options["specific_sections"]:
+            ui_subheader("Section Filters")
+            for day, period in options["specific_sections"]:
+                ui_item(f"{day} {format_period_with_time(period)}", "cyan")
+        else:
+            ui_label("Section filters", "none; every SIS section matching the course code can be selected", "yellow")
+
+    mode_text = "LIVE" if options["live"] else "DRY-RUN"
+    ui_label("Final request mode", style(mode_text, "bold", "red" if options["live"] else "green"), "red" if options["live"] else "green")
+    ui_subheader("Order From Here")
+    print(f"  {style('1.', 'bold', 'cyan')} Open visible Chrome and log in.")
+    print(f"  {style('2.', 'bold', 'cyan')} Keep Chrome on the SIS registration page and check until registration opens.")
+    print(f"  {style('3.', 'bold', 'cyan')} As soon as it opens, map your planned sections to SIS and show the final payload.")
+    print(f"  {style('4.', 'bold', 'cyan')} Ask again before submitting selected lectures and before the final live request.")
+
+    if not parse_yes_no("\nConfirm this exact schedule plan before opening SIS?", default=False):
+        logger.info("Cancelled before login or registration-open checking.")
+        sys.exit(0)
+    if not parse_yes_no("Start visible Chrome and begin waiting for registration after login?", default=False):
+        logger.info("Cancelled before registration-open checking.")
+        sys.exit(0)
+    if options["live"] and not parse_yes_no("Final pre-open LIVE confirmation: continue?", default=False):
+        logger.info("Cancelled before live registration-open checking.")
+        sys.exit(0)
+
+
 def main():
     credential_store = CredentialStore(remember=True)
     user_id, password = credential_store.ensure_login_credentials()
@@ -2209,7 +2446,9 @@ def main():
         log_schedule_plan_preview(planned_sections, source_label)
         logger.info(f"Imported {len(planned_sections)} selected sections from schedule-plan.")
 
-    # 1. Login
+    confirm_pre_open_plan(options, planned_sections=planned_sections)
+
+    # 1. Login before registration opens, but do not start polling until the plan is locked.
     browser_driver = None
     cookies, std_guid, registration_html, browser_driver = login_with_selenium(user_id, password)
     if not cookies:
@@ -2225,16 +2464,21 @@ def main():
         registration_html=registration_html,
         browser_driver=browser_driver,
     )
+
+    # 2. Keep visible Chrome checking until SIS shows the registration timetable.
+    registration_html = wait_for_registration_to_open_in_browser(browser_driver)
+    client.registration_html = registration_html
+    client.registration_table_ready = bool(registration_html)
     
-    # 2. Get Page
+    # 3. Get Page
     if not client.get_registration_page():
         sys.exit(1)
         
-    # 3. Accept Approval
+    # 4. Accept Approval
     if not client.accept_approval():
         sys.exit(1)
         
-    # 4. Get Timetable & Select
+    # 5. Get Timetable & Select
     if options["use_schedule_plan"]:
         if not client.get_timetable_and_select_schedule_plan(planned_sections):
             sys.exit(1)
@@ -2249,11 +2493,11 @@ def main():
         logger.info("Cancelled before submitting any selected lectures to SIS.")
         sys.exit(0)
         
-    # 5. Submit Selection
+    # 6. Submit Selection
     if not client.submit_selection():
         sys.exit(1)
         
-    # 6. Captcha + 7. Finalize (with auto-retry on wrong captcha)
+    # 7. Captcha + 8. Finalize (with auto-retry on wrong captcha)
     if not client.confirm_final_registration_request():
         logger.info("Cancelled before final registration request.")
         sys.exit(0)

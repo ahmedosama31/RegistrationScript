@@ -103,6 +103,11 @@ def ui_item(text, color=None):
     print(f"  - {style(text, color) if color else text}")
 
 
+def format_course_codes(codes):
+    normalized = sorted({normalize_course_code(code) for code in codes if normalize_course_code(code)})
+    return ", ".join(normalized) if normalized else "none"
+
+
 BASE_URL = "https://std.eng.cu.edu.eg"
 REGISTRATION_PATH = "/SIS/Modules/MetaLoader.aspx?path=~/SIS/Modules/Student/Registration/Registration.ascx"
 XML_HANDLER_PATH = "/SIS/Modules/MyXMLHandler.ashx"
@@ -233,6 +238,11 @@ class CredentialStore:
             codes = [codes]
         return {normalize_course_code(code) for code in codes if normalize_course_code(code)}
 
+    def save_force_preserve_course_codes(self, codes):
+        normalized = sorted({normalize_course_code(code) for code in codes if normalize_course_code(code)})
+        self.data["force_preserve_course_codes"] = normalized
+        self._save()
+
     def save_user_id(self, user_id):
         if not self.remember or not user_id:
             return
@@ -307,6 +317,14 @@ def normalize_course_code(code):
     return re.sub(r"[^A-Z0-9]", "", (code or "").upper())
 
 
+def parse_course_codes(raw):
+    return [
+        normalize_course_code(code)
+        for code in re.split(r"[\s,;]+", raw or "")
+        if normalize_course_code(code)
+    ]
+
+
 def _read_windows_menu_key():
     """Read a single Windows console key, normalizing arrow keys."""
     import msvcrt
@@ -352,7 +370,7 @@ def _select_yes_no_with_arrows(prompt, default=False):
 
     print()
     print(style(prompt, "bold", "yellow"))
-    ui_note("Use Up/Down arrows, then Enter. You can also press Y or N.")
+    ui_note("Up/Down + Enter, or Y/N.")
     _print_yes_no_options(labels, selected)
 
     while True:
@@ -390,7 +408,7 @@ def _print_choice_options(choices, selected, redraw=False):
 def _select_choice_with_arrows(prompt, choices):
     selected = 0
     ui_subheader(prompt)
-    ui_note("Use Up/Down arrows, then Enter. You can also press a number.")
+    ui_note("Up/Down + Enter, or a number.")
     _print_choice_options(choices, selected)
 
     while True:
@@ -456,6 +474,35 @@ def prompt_choice(prompt, choices):
             if 1 <= idx <= len(choices):
                 return choices[idx - 1][0]
         print(style(f"Please enter a number from 1 to {len(choices)}.", "red"))
+
+
+def prompt_force_preserve_courses(credential_store):
+    saved_codes = credential_store.get_force_preserve_course_codes() if credential_store else set()
+    default_enabled = bool(saved_codes)
+    prompt = "Preserve courses SIS might drop, like Industrial Training?"
+    if saved_codes:
+        prompt += f" Current: {format_course_codes(saved_codes)}."
+
+    if not parse_yes_no(prompt, default=default_enabled):
+        if saved_codes and parse_yes_no("Clear saved preserve-course list?", default=False):
+            credential_store.save_force_preserve_course_codes([])
+        return set()
+
+    while True:
+        raw = input(
+            style(
+                f"Course codes to preserve [{format_course_codes(saved_codes)}]: ",
+                "bold",
+                "yellow",
+            )
+        ).strip()
+        codes = parse_course_codes(raw) if raw else sorted(saved_codes)
+        if codes:
+            break
+        print(style("Enter at least one course code.", "red"))
+    if credential_store:
+        credential_store.save_force_preserve_course_codes(codes)
+    return set(codes)
 
 
 def parse_number_list(raw, max_value):
@@ -1200,6 +1247,7 @@ class RegistrationClient:
         registration_ready=False,
         registration_html=None,
         browser_driver=None,
+        force_preserve_course_codes=None,
     ):
         self.session = requests.Session()
         self.session.cookies.update(cookies)
@@ -1219,12 +1267,17 @@ class RegistrationClient:
         self.registration_table_ready = registration_ready
         self.registration_html = registration_html
         self.browser_driver = browser_driver
-        self.force_preserve_course_codes = set()
+        self.force_preserve_course_codes = {
+            normalize_course_code(code)
+            for code in (force_preserve_course_codes or [])
+            if normalize_course_code(code)
+        }
         if std_guid:
             self._add_stdid_candidate(std_guid)
         if credential_store:
             self.user_id = credential_store.get_user_id()
-            self.force_preserve_course_codes = credential_store.get_force_preserve_course_codes()
+            if force_preserve_course_codes is None:
+                self.force_preserve_course_codes = credential_store.get_force_preserve_course_codes()
 
         if registration_html:
             soup = BeautifulSoup(registration_html, "html.parser")
@@ -2298,9 +2351,8 @@ class RegistrationClient:
                 and "register" not in lowered[:500].lower())
         )
 
-def collect_cli_options(user_id):
+def collect_cli_options(user_id, credential_store):
     ui_header("SIS Registration Bot")
-    ui_note("Answer the prompts below. No command-line flags needed.")
     if len(sys.argv) > 1:
         print(style("Note: command-line options are ignored in this interactive version.", "yellow"))
 
@@ -2325,19 +2377,18 @@ def collect_cli_options(user_id):
         "schedule_plan_name": None,
         "schedule_source": mode,
         "live": False,
+        "force_preserve_course_codes": set(),
     }
 
     if mode == "gui":
         logger.info(f"Opening schedule-plan: {SCHEDULE_PLAN_URL}")
         webbrowser.open(SCHEDULE_PLAN_URL)
         ui_subheader("Schedule-Plan Setup")
-        ui_item("Configure your schedule in schedule-plan.")
-        ui_item("Save it there, then come back here.")
         ui_label("Student ID used for import", user_id, "green")
         maybe_name = input(style("Enter schedule name if not default (or press Enter): ", "bold", "yellow")).strip()
         if maybe_name:
             options["schedule_plan_name"] = maybe_name
-        input(style("Press Enter only after you have saved the schedule in schedule-plan...", "bold", "yellow"))
+        input(style("Press Enter after saving in schedule-plan...", "bold", "yellow"))
     elif mode == "saved_schedule":
         ui_subheader("Saved Schedule Import")
         ui_label("Student ID used for import", user_id, "green")
@@ -2365,8 +2416,10 @@ def collect_cli_options(user_id):
                 logger.info("Cancelled before login.")
                 sys.exit(0)
 
+    options["force_preserve_course_codes"] = prompt_force_preserve_courses(credential_store)
+
     options["live"] = parse_yes_no(
-        "Send the real final registration request? Choose No for dry-run.",
+        "Send the real final registration request?",
         default=False,
     )
     if options["live"]:
@@ -2381,12 +2434,11 @@ def collect_cli_options(user_id):
 def confirm_pre_open_plan(options, planned_sections=None):
     """Lock the user's intent before the bot starts checking whether registration is open."""
     ui_header("Pre-Open Plan Review")
-    ui_note("The bot will not start checking registration until you confirm this plan.")
 
     if options["use_schedule_plan"]:
         source = "saved schedule-plan schedule"
         if options["schedule_source"] == "gui":
-            source = "schedule-plan after you configured and saved it"
+            source = "schedule-plan"
         ui_label("Schedule source", source, "cyan")
         ui_label("Student ID used for import", options["schedule_plan_student_id"], "green")
         if options["schedule_plan_name"]:
@@ -2406,13 +2458,9 @@ def confirm_pre_open_plan(options, planned_sections=None):
         else:
             ui_label("Section filters", "none; every SIS section matching the course code can be selected", "yellow")
 
+    ui_label("Preserve courses", format_course_codes(options["force_preserve_course_codes"]), "yellow")
     mode_text = "LIVE" if options["live"] else "DRY-RUN"
     ui_label("Final request mode", style(mode_text, "bold", "red" if options["live"] else "green"), "red" if options["live"] else "green")
-    ui_subheader("Order From Here")
-    print(f"  {style('1.', 'bold', 'cyan')} Open visible Chrome and log in.")
-    print(f"  {style('2.', 'bold', 'cyan')} Keep Chrome on the SIS registration page and check until registration opens.")
-    print(f"  {style('3.', 'bold', 'cyan')} As soon as it opens, map your planned sections to SIS and show the final payload.")
-    print(f"  {style('4.', 'bold', 'cyan')} Ask again before submitting selected lectures and before the final live request.")
 
     if not parse_yes_no("\nConfirm this exact schedule plan before opening SIS?", default=False):
         logger.info("Cancelled before login or registration-open checking.")
@@ -2428,7 +2476,7 @@ def confirm_pre_open_plan(options, planned_sections=None):
 def main():
     credential_store = CredentialStore(remember=True)
     user_id, password = credential_store.ensure_login_credentials()
-    options = collect_cli_options(user_id)
+    options = collect_cli_options(user_id, credential_store)
     planned_sections = None
 
     if options["use_schedule_plan"]:
@@ -2463,6 +2511,7 @@ def main():
         registration_ready=bool(registration_html),
         registration_html=registration_html,
         browser_driver=browser_driver,
+        force_preserve_course_codes=options["force_preserve_course_codes"],
     )
 
     # 2. Keep visible Chrome checking until SIS shows the registration timetable.

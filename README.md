@@ -46,6 +46,10 @@ You can choose from:
 - Import a saved schedule-plan schedule by student ID.
 - Type a course code and section filters before login.
 
+During setup, the script also asks whether to preserve courses SIS might drop from
+the payload, such as Industrial Training. Enter the course code once and it is
+saved in `.registration_bot_credentials.json` for later runs.
+
 The script is designed for the registration-opening moment: choose or import the
 schedule first, confirm the plan, then let visible Chrome log in and keep checking
 until registration opens. The bot will not start the registration-open polling loop
@@ -95,7 +99,7 @@ The script logs both SIS slot and real time (example: `9:10 (4:00-5:50)`).
 - If auto-detection fails, the script asks for manual input.
 - If SIS says registration is closed, the script keeps visible Chrome open in front of you and presses "Check if it is open now" or refreshes until the timetable page becomes visible. Press `Ctrl+C` to cancel the wait.
 - Existing SIS selections are always preserved in the final selection payload so the bot does not deselect courses you already had selected.
-- Optional per-user `force_preserve_course_codes` can be added to `.registration_bot_credentials.json` for courses SIS shows as visually selected while the timetable XML reports `Selected="0"`.
+- The setup prompt can save per-user `force_preserve_course_codes` in `.registration_bot_credentials.json` for courses SIS shows as visually selected while the timetable XML reports `Selected="0"`.
 - After the final registration request, the script saves the SIS result page to `debug_final_registration_response.html` and prints whether course codes appear in the returned schedule/status text.
 - In live mode, the final registration request is submitted through the visible Chrome window so the SIS website itself stays open on the final schedule/status page.
 - Keep generated debug/capture files private; `.gitignore` blocks common sensitive artifacts.

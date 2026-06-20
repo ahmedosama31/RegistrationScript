@@ -1,8 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-import selenium
+from importlib.util import find_spec
 
-_selenium_dir = os.path.dirname(selenium.__file__)
+_selenium_dir = os.path.dirname(find_spec('selenium').origin)
 _selenium_manager = os.path.join(
     _selenium_dir,
     'webdriver',
@@ -33,6 +33,9 @@ a = Analysis(
         'ddddocr',
         'onnxruntime',
         'onnxruntime_tools',
+        'cv2',
+        'opencv_python',
+        'opencv_python_headless',
         'matplotlib',
         'numpy',
         'pandas',

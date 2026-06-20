@@ -27,16 +27,8 @@ from io import BytesIO
 
 # Optional: ddddocr for automatic captcha solving.
 # Install with: pip install ddddocr
-try:
-    import ddddocr as _ddddocr_module
-    _ocr = _ddddocr_module.DdddOcr(show_ad=False)
-    DDDDOCR_AVAILABLE = True
-except Exception as _ddddocr_exc:
-    import traceback as _tb
-    print(f"[ddddocr] Could not load – falling back to manual captcha. Reason: {_ddddocr_exc}")
-    _tb.print_exc()
-    _ocr = None
-    DDDDOCR_AVAILABLE = False
+_ocr = None
+_ddddocr_load_error = None
 
 AUTO_CAPTCHA_MAX_RETRIES = 3  # how many times to auto-attempt before asking manually
 
@@ -451,6 +443,36 @@ def pause_if_frozen(message="Press Enter to close..."):
             input(message)
         except Exception:
             pass
+
+
+def _install_cv2_stub_for_ocr_only():
+    """Let ddddocr import its unused detection module without bundling OpenCV."""
+    if "cv2" in sys.modules:
+        return
+
+    class _OpenCvStub:
+        def __getattr__(self, name):
+            raise ImportError("OpenCV is not bundled; only ddddocr text OCR is supported.")
+
+    sys.modules["cv2"] = _OpenCvStub()
+
+
+def get_ocr_solver():
+    global _ocr, _ddddocr_load_error
+    if _ocr is not None:
+        return _ocr
+    if _ddddocr_load_error is not None:
+        return None
+
+    try:
+        _install_cv2_stub_for_ocr_only()
+        import ddddocr as _ddddocr_module
+        _ocr = _ddddocr_module.DdddOcr(show_ad=False)
+        return _ocr
+    except Exception as exc:
+        _ddddocr_load_error = exc
+        logger.info(f"ddddocr unavailable; falling back to manual captcha input. Reason: {exc}")
+        return None
 
 
 def prompt_choice(prompt, choices):
@@ -2123,10 +2145,11 @@ class RegistrationClient:
         if img_bytes is None:
             return None
 
-        if DDDDOCR_AVAILABLE and not manual:
+        ocr_solver = None if manual else get_ocr_solver()
+        if ocr_solver is not None:
             processed = self._preprocess_captcha_for_ocr(img_bytes)
             try:
-                result = _ocr.classification(processed)
+                result = ocr_solver.classification(processed)
                 result = (result or "").strip()
                 if result:
                     logger.info(f"Auto-captcha solved: '{result}'")
@@ -2134,7 +2157,7 @@ class RegistrationClient:
                 logger.warning("Auto-captcha returned empty result; falling back to manual input.")
             except Exception as exc:
                 logger.warning(f"Auto-captcha OCR error: {exc}; falling back to manual input.")
-        elif not DDDDOCR_AVAILABLE:
+        elif not manual:
             logger.info(
                 "ddddocr is not installed (pip install ddddocr). "
                 "Falling back to manual captcha input."

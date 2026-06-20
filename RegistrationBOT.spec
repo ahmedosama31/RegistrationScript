@@ -1,11 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-import ddddocr
-import selenium
+from importlib.util import find_spec
 
-# Locate the ddddocr package directory so we can bundle its model file.
-_ddddocr_dir = os.path.dirname(ddddocr.__file__)
-_selenium_dir = os.path.dirname(selenium.__file__)
+_ddddocr_dir = os.path.dirname(find_spec('ddddocr').origin)
+_selenium_dir = os.path.dirname(find_spec('selenium').origin)
 _selenium_manager = os.path.join(
     _selenium_dir,
     'webdriver',
@@ -19,8 +17,8 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        # Bundle the ddddocr ONNX model and any other data files it ships with.
-        (_ddddocr_dir, 'ddddocr'),
+        # Bundle only the default OCR model used by DdddOcr(show_ad=False).
+        (os.path.join(_ddddocr_dir, 'common_old.onnx'), 'ddddocr'),
         (_selenium_manager, 'selenium/webdriver/common/windows'),
     ],
     hiddenimports=[
@@ -36,7 +34,16 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        'cv2',
+        'opencv_python',
+        'opencv_python_headless',
+        'onnxruntime_tools',
+        'matplotlib',
+        'pandas',
+        'tkinter',
+        'unittest',
+    ],
     noarchive=False,
     optimize=0,
 )

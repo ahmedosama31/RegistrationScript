@@ -3,4 +3,3 @@ beautifulsoup4
 selenium
 webdriver-manager
 Pillow
-ddddocr

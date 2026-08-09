@@ -1,0 +1,2 @@
+# Optional dependency for automatic CAPTCHA solving in source installs.
+ddddocr

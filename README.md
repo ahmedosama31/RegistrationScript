@@ -113,9 +113,20 @@ The script logs both SIS slot and real time (example: `9:10 (4:00-5:50)`).
 
 ## Making a Release
 
-For a simple GitHub release:
+Pushing a version tag automatically builds and publishes two Windows ZIPs through
+`.github/workflows/release.yml`:
 
-1. Make sure `python -m py_compile register.py` passes.
+- `registrationscript-<tag>-windows.zip`: `registrationscript.exe` with automatic CAPTCHA solving.
+- `registrationscript-<tag>-windows-lite.zip`: `registrationscript-lite.exe`, with manual CAPTCHA entry and a smaller download.
+
+The packaged EXEs include Python and the Python libraries they use, so friends do
+not need Python, pip, or `requirements.txt`. They do need Windows 10/11, Google
+Chrome installed, and internet access to SIS. ChromeDriver is handled automatically
+when the EXE starts; the first run may download it.
+
+To publish a release:
+
+1. Make sure `python -m py_compile register.py` passes and push the code.
 2. Create a version tag, for example:
 
 ```bash
@@ -123,23 +134,12 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-3. On GitHub, create a release from that tag and attach a zip containing:
+3. GitHub Actions builds both EXEs and creates the release automatically.
 
-- `register.py`
-- `requirements.txt`
-- `.registration_bot_credentials.example.json`
-- `README.md`
-
-Users can download the zip, install requirements, edit the example credentials file if they want, and run `python register.py`.
-
-For a more polished Windows release later, package it with PyInstaller:
-
-```bash
-pip install pyinstaller
-pyinstaller --onefile register.py
-```
-
-Then attach `dist/register.exe` plus the example credentials file to the GitHub release.
+For source usage instead of a packaged release, install `requirements.txt` and run
+`python register.py`. The optional `ddddocr` package enables automatic CAPTCHA
+solving; install it with `pip install -r requirements-ocr.txt`. Without it, the
+script asks for the CAPTCHA manually.
 
 ## Disclaimer
 

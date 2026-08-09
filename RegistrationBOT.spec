@@ -55,7 +55,8 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='RegistrationBOT',
+    # Keep the release filename stable and aligned with the repository name.
+    name='registrationscript',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

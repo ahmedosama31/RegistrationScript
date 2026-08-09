@@ -27,32 +27,33 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller ddddocr
+          pip install -r requirements-ocr.txt
+          pip install pyinstaller
 
       - name: Build EXE (full)
-        run: pyinstaller RegistrationBOT.spec
+        run: python -m PyInstaller --clean --noconfirm RegistrationBOT.spec
 
       - name: Verify EXE exists
         run: |
-          if (!(Test-Path "dist\RegistrationBOT.exe")) {
+          if (!(Test-Path "dist\registrationscript.exe")) {
             Write-Error "EXE not found after build!"
             exit 1
           }
-          Write-Host "EXE size: $((Get-Item 'dist\RegistrationBOT.exe').length / 1MB) MB"
+          Write-Host "EXE size: $((Get-Item 'dist\registrationscript.exe').length / 1MB) MB"
 
       - name: Bundle full ZIP
         run: |
           Compress-Archive -Force -Path `
-            "dist\RegistrationBOT.exe", `
+            "dist\registrationscript.exe", `
             ".registration_bot_credentials.example.json", `
             "README.md" `
-            -DestinationPath "RegistrationBOT-${{ github.ref_name }}-windows.zip"
+            -DestinationPath "registrationscript-${{ github.ref_name }}-windows.zip"
 
       - name: Upload full ZIP as artifact
         uses: actions/upload-artifact@v4
         with:
           name: full-zip
-          path: RegistrationBOT-${{ github.ref_name }}-windows.zip
+          path: registrationscript-${{ github.ref_name }}-windows.zip
 
   # ── Lite build: no ddddocr/onnxruntime, much smaller, manual CAPTCHA only ───
   build-lite:
@@ -75,29 +76,29 @@ jobs:
           pip install pyinstaller
 
       - name: Build EXE (lite)
-        run: pyinstaller RegistrationBOT-lite.spec
+        run: python -m PyInstaller --clean --noconfirm RegistrationBOT-lite.spec
 
       - name: Verify EXE exists
         run: |
-          if (!(Test-Path "dist\RegistrationBOT-lite.exe")) {
+          if (!(Test-Path "dist\registrationscript-lite.exe")) {
             Write-Error "Lite EXE not found after build!"
             exit 1
           }
-          Write-Host "Lite EXE size: $((Get-Item 'dist\RegistrationBOT-lite.exe').length / 1MB) MB"
+          Write-Host "Lite EXE size: $((Get-Item 'dist\registrationscript-lite.exe').length / 1MB) MB"
 
       - name: Bundle lite ZIP
         run: |
           Compress-Archive -Force -Path `
-            "dist\RegistrationBOT-lite.exe", `
+            "dist\registrationscript-lite.exe", `
             ".registration_bot_credentials.example.json", `
             "README.md" `
-            -DestinationPath "RegistrationBOT-${{ github.ref_name }}-windows-lite.zip"
+            -DestinationPath "registrationscript-${{ github.ref_name }}-windows-lite.zip"
 
       - name: Upload lite ZIP as artifact
         uses: actions/upload-artifact@v4
         with:
           name: lite-zip
-          path: RegistrationBOT-${{ github.ref_name }}-windows-lite.zip
+          path: registrationscript-${{ github.ref_name }}-windows-lite.zip
 
   # ── Publish: create one GitHub Release with both ZIPs attached ───────────────
   publish:
@@ -116,31 +117,49 @@ jobs:
         with:
           name: lite-zip
 
+      - name: Calculate ZIP sizes
+        run: |
+          python - <<'PY' >> "$GITHUB_ENV"
+          import os
+
+          ref_name = os.environ["GITHUB_REF_NAME"]
+          files = {
+              "FULL_ZIP_SIZE": f"registrationscript-{ref_name}-windows.zip",
+              "LITE_ZIP_SIZE": f"registrationscript-{ref_name}-windows-lite.zip",
+          }
+
+          for env_name, path in files.items():
+              size_mb = os.path.getsize(path) / (1024 * 1024)
+              print(f"{env_name}={size_mb:.1f} MB")
+          PY
+
       - name: Create GitHub Release and upload both ZIPs
         uses: softprops/action-gh-release@v2
         with:
-          name: "RegistrationBOT ${{ github.ref_name }}"
+          name: "RegistrationScript ${{ github.ref_name }}"
           body: |
-            ## RegistrationBOT ${{ github.ref_name }}
+            ## RegistrationScript ${{ github.ref_name }}
 
             ### Which download should I pick?
 
             | File | Size | Auto-CAPTCHA | Notes |
             |---|---|---|---|
-            | `RegistrationBOT-${{ github.ref_name }}-windows.zip` | ~100 MB | ✅ Yes (ddddocr) | Recommended – solves CAPTCHAs automatically |
-            | `RegistrationBOT-${{ github.ref_name }}-windows-lite.zip` | ~20–30 MB | ❌ No | You'll be prompted to type the CAPTCHA manually |
+            | `registrationscript-${{ github.ref_name }}-windows.zip` | ${{ env.FULL_ZIP_SIZE }} | ✅ Yes (ddddocr) | Recommended – solves CAPTCHAs automatically |
+            | `registrationscript-${{ github.ref_name }}-windows-lite.zip` | ${{ env.LITE_ZIP_SIZE }} | ❌ No | You'll be prompted to type the CAPTCHA manually |
 
             ### Quick Start (Windows – no Python needed)
-            1. Download your preferred ZIP above and extract it anywhere.
+            1. Download your preferred ZIP above and extract it to a normal writable folder.
             2. *(Optional)* Rename `.registration_bot_credentials.example.json` → `.registration_bot_credentials.json` and fill in your credentials so you aren't prompted every run.
             3. Double-click the `.exe` (or run it from a terminal).
+
+            **Runtime requirement:** Windows 10/11 with Google Chrome installed, plus internet access to SIS. Python and pip are not required for these ZIPs. The first run may download a matching ChromeDriver automatically.
 
             ### What's new
             See the [commit history](../../commits/${{ github.ref_name }}) for details.
 
             > **Disclaimer:** Use only on accounts you are authorised to access and in compliance with your institution's policies.
           files: |
-            RegistrationBOT-${{ github.ref_name }}-windows.zip
-            RegistrationBOT-${{ github.ref_name }}-windows-lite.zip
+            registrationscript-${{ github.ref_name }}-windows.zip
+            registrationscript-${{ github.ref_name }}-windows-lite.zip
           draft: false
           prerelease: false

@@ -10,6 +10,19 @@ import getpass
 import webbrowser
 import html as html_lib
 import traceback
+import warnings
+
+# Use the native Windows certificate store so requests follows the same trust
+# decisions as Chrome. This fixes schedule-plan HTTPS failures caused by a
+# locally trusted certificate that is not present in certifi's CA bundle.
+try:
+    import truststore
+    truststore.inject_into_ssl()
+except ImportError:
+    truststore = None
+except Exception as exc:
+    warnings.warn(f"Could not enable the native certificate store: {exc}")
+
 import requests
 from bs4 import BeautifulSoup
 from selenium import webdriver
@@ -1953,14 +1966,6 @@ class RegistrationClient:
         else:
             ui_item("None detected", "dim")
 
-        ui_subheader("Force-Preserved")
-        ui_note("Used when SIS can show a section visually selected while XML says Selected=0.")
-        if self.force_preserved_details:
-            for lec in self.force_preserved_details:
-                ui_item(self.format_lecture_line(lec), "yellow")
-        else:
-            ui_item("None", "dim")
-
         ui_subheader("New Selections To Add")
         if self.new_selected_details:
             for lec in self.new_selected_details:
@@ -1975,15 +1980,6 @@ class RegistrationClient:
         else:
             ui_item("None", "dim")
 
-        if self.force_preserve_course_codes:
-            ui_subheader("Configured Force-Preservation Checks")
-            for code in sorted(self.force_preserve_course_codes):
-                preserved = any(
-                    normalize_course_code(lec["code"]) == code
-                    for lec in self.existing_selected_details + self.force_preserved_details
-                )
-                status = "YES, included in final payload" if preserved else "NO, not found to preserve"
-                ui_item(f"{code}: {status}", "green" if preserved else "red")
         ui_label("Raw selection string that will be sent", self.selected_lectures_str, "yellow")
 
         return parse_yes_no("\nSubmit this selection to SIS?", default=False)
@@ -2400,7 +2396,6 @@ def collect_cli_options(user_id, credential_store):
         "schedule_plan_name": None,
         "schedule_source": mode,
         "live": False,
-        "force_preserve_course_codes": set(),
     }
 
     if mode == "gui":
@@ -2435,11 +2430,6 @@ def collect_cli_options(user_id, credential_store):
         options["specific_sections"] = parse_section_targets(section_texts)
         if not options["specific_sections"]:
             logger.warning("No section filters entered. The bot will select every SIS section matching that course code.")
-            if not parse_yes_no("Continue with every matching section?", default=False):
-                logger.info("Cancelled before login.")
-                sys.exit(0)
-
-    options["force_preserve_course_codes"] = prompt_force_preserve_courses(credential_store)
 
     options["live"] = parse_yes_no(
         "Send the real final registration request?",
@@ -2447,9 +2437,6 @@ def collect_cli_options(user_id, credential_store):
     )
     if options["live"]:
         logger.warning("LIVE mode will send the final registration request after captcha/password.")
-        if not parse_yes_no("Continue in LIVE mode?", default=False):
-            logger.info("Cancelled before login.")
-            sys.exit(0)
 
     return options
 
@@ -2481,19 +2468,10 @@ def confirm_pre_open_plan(options, planned_sections=None):
         else:
             ui_label("Section filters", "none; every SIS section matching the course code can be selected", "yellow")
 
-    ui_label("Preserve courses", format_course_codes(options["force_preserve_course_codes"]), "yellow")
     mode_text = "LIVE" if options["live"] else "DRY-RUN"
     ui_label("Final request mode", style(mode_text, "bold", "red" if options["live"] else "green"), "red" if options["live"] else "green")
 
-    if not parse_yes_no("\nConfirm this exact schedule plan before opening SIS?", default=False):
-        logger.info("Cancelled before login or registration-open checking.")
-        sys.exit(0)
-    if not parse_yes_no("Start visible Chrome and begin waiting for registration after login?", default=False):
-        logger.info("Cancelled before registration-open checking.")
-        sys.exit(0)
-    if options["live"] and not parse_yes_no("Final pre-open LIVE confirmation: continue?", default=False):
-        logger.info("Cancelled before live registration-open checking.")
-        sys.exit(0)
+    logger.info("Plan review complete. Starting visible Chrome and registration-open checking.")
 
 
 def main():
@@ -2534,7 +2512,10 @@ def main():
         registration_ready=bool(registration_html),
         registration_html=registration_html,
         browser_driver=browser_driver,
-        force_preserve_course_codes=options["force_preserve_course_codes"],
+        # Preserve-course support remains implemented, but is not exposed by
+        # the normal CLI flow. Pass an explicit empty set so saved legacy
+        # values do not silently re-enable it.
+        force_preserve_course_codes=set(),
     )
 
     # 2. Keep visible Chrome checking until SIS shows the registration timetable.

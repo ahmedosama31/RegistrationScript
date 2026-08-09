@@ -21,6 +21,10 @@ a = Analysis(
     hiddenimports=[
         'PIL',
         'PIL.Image',
+        'truststore',
+        'truststore._api',
+        'truststore._ssl_constants',
+        'truststore._windows',
         'selenium.webdriver.chrome.webdriver',
         'selenium.webdriver.chrome.service',
         'selenium.webdriver.common.selenium_manager',

@@ -68,6 +68,8 @@ When asked "Send the real final registration request? Choose No for dry-run.",
 choose No for a dry run. To actually submit registration, choose Yes; the script
 shows the plan once before opening SIS, then only asks before submitting the
 selected lectures and before the final live request.
+The final SIS review groups the selected courses and shows their chosen sections,
+whether they came from schedule-plan or manual entry.
 
 The first time you run the CLI, it asks for your SIS Student ID and password. It saves them in `.registration_bot_credentials.json`, which is an editable JSON file ignored by git. After that, the bot reuses those credentials until you edit the file. Keep that file private because it contains your password.
 

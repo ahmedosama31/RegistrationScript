@@ -1282,6 +1282,7 @@ class RegistrationClient:
         registration_ready=False,
         registration_html=None,
         browser_driver=None,
+        selection_source=None,
         force_preserve_course_codes=None,
     ):
         self.session = requests.Session()
@@ -1302,6 +1303,7 @@ class RegistrationClient:
         self.registration_table_ready = registration_ready
         self.registration_html = registration_html
         self.browser_driver = browser_driver
+        self.selection_source = selection_source
         self.force_preserve_course_codes = {
             normalize_course_code(code)
             for code in (force_preserve_course_codes or [])
@@ -1955,9 +1957,39 @@ class RegistrationClient:
 
         return True
 
+    def show_selected_course_summary(self):
+        source_labels = {
+            "gui": "schedule-plan",
+            "saved_schedule": "saved schedule-plan",
+            "manual": "manual entry",
+        }
+        source_label = source_labels.get(self.selection_source, "registration plan")
+        ui_subheader(f"Courses Selected ({source_label})")
+
+        courses = {}
+        for lecture in self.selected_lecture_details:
+            code = (lecture.get("code") or "").strip() or "Unknown course"
+            courses.setdefault(code, []).append(lecture)
+
+        if not courses:
+            ui_item("None", "dim")
+            return
+
+        for code in sorted(courses):
+            lectures = courses[code]
+            section_word = "section" if len(lectures) == 1 else "sections"
+            ui_item(f"{code} ({len(lectures)} {section_word})", "cyan")
+            for lecture in lectures:
+                ui_item(
+                    f"{lecture['type']} | {lecture['day']} {lecture['period_label']}",
+                    "dim",
+                )
+
     def confirm_selection_before_submit(self):
         ui_header("Review Final SIS Selection")
         ui_note("Nothing is submitted until you confirm this screen.")
+
+        self.show_selected_course_summary()
 
         ui_subheader("Already Selected In SIS And Preserved")
         if self.existing_selected_details:
@@ -2512,6 +2544,7 @@ def main():
         registration_ready=bool(registration_html),
         registration_html=registration_html,
         browser_driver=browser_driver,
+        selection_source=options["schedule_source"],
         # Preserve-course support remains implemented, but is not exposed by
         # the normal CLI flow. Pass an explicit empty set so saved legacy
         # values do not silently re-enable it.

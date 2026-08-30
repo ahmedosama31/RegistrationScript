@@ -2,7 +2,6 @@
 import os
 from importlib.util import find_spec
 
-_ddddocr_dir = os.path.dirname(find_spec('ddddocr').origin)
 _selenium_dir = os.path.dirname(find_spec('selenium').origin)
 _selenium_manager = os.path.join(
     _selenium_dir,
@@ -17,12 +16,9 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
-        (os.path.join(_ddddocr_dir, 'common_old.onnx'), 'ddddocr'),
         (_selenium_manager, 'selenium/webdriver/common/windows'),
     ],
     hiddenimports=[
-        'ddddocr',
-        'onnxruntime',
         'PIL',
         'PIL.Image',
         'truststore',
@@ -38,11 +34,15 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
+        'ddddocr',
+        'onnxruntime',
+        'onnxruntime_tools',
         'cv2',
         'opencv_python',
         'opencv_python_headless',
         'onnxruntime_tools',
         'matplotlib',
+        'numpy',
         'pandas',
         'tkinter',
         'unittest',

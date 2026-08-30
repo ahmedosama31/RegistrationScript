@@ -154,7 +154,7 @@ jobs:
             |---|---|---|---|
             | `registrationscript.exe` | ${{ env.NORMAL_EXE_SIZE }} | Automatic OCR + SIS validation | Standard version. Opens Chrome for login and registration monitoring, then submits the selected schedule. |
             | `registrationscript-lite.exe` | ${{ env.LITE_EXE_SIZE }} | Manual entry + SIS validation | Smaller standard version without the OCR model. You type the CAPTCHA shown by SIS. |
-            | `registrationscript-visible.exe` | ${{ env.VISIBLE_EXE_SIZE }} | Student completes it manually in Chrome | Visible handoff version. Chrome rapidly clicks and highlights every selected lecture/tutorial, then the bot stops without submitting. |
+            | `registrationscript-visible.exe` | ${{ env.VISIBLE_EXE_SIZE }} | Automatic OCR when continuing; manual when handed off | Visible version. At startup, choose whether Chrome hands control to the student after selecting or continues automatically. |
             | `registrationscript-api.exe` | ${{ env.API_EXE_SIZE }} | Automatic OCR + SIS validation | Direct API version. Uses the SIS HTTP/Ext.NET endpoints without opening Chrome. |
 
             ### Quick Start (Windows – no Python needed)

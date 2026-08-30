@@ -2628,6 +2628,16 @@ def collect_cli_options(user_id, credential_store, runtime_mode="hybrid"):
     if os.path.exists(CREDENTIALS_FILE):
         ui_label("Saved credentials file", os.path.abspath(CREDENTIALS_FILE), "green")
 
+    visible_after_selection = None
+    if runtime_mode == "visible":
+        visible_after_selection = prompt_choice(
+            "What should happen after the visible course selection?",
+            [
+                ("handoff", "Stop and hand control to the student"),
+                ("automatic", "Continue with the automated registration flow"),
+            ],
+        )
+
     section_modes = [
         ("saved_schedule", "Import your saved schedule-plan schedule"),
         ("manual", "Type before login: course code, then filters like Sunday 4-6"),
@@ -2649,6 +2659,7 @@ def collect_cli_options(user_id, credential_store, runtime_mode="hybrid"):
         "schedule_plan_name": None,
         "schedule_source": mode,
         "live": False,
+        "visible_after_selection": visible_after_selection,
     }
 
     if mode == "gui":
@@ -2684,11 +2695,11 @@ def collect_cli_options(user_id, credential_store, runtime_mode="hybrid"):
         if not options["specific_sections"]:
             logger.warning("No section filters entered. The bot will select every SIS section matching that course code.")
 
-    if runtime_mode == "visible":
+    if runtime_mode == "visible" and visible_after_selection == "handoff":
         options["live"] = False
         ui_note(
-            "The visible version only selects sections in Chrome. "
-            "The student completes every submission step manually."
+            "After selecting sections in Chrome, the program will stop automation "
+            "and the student will complete every submission step manually."
         )
     else:
         options["live"] = parse_yes_no(
@@ -2728,11 +2739,13 @@ def confirm_pre_open_plan(options, planned_sections=None, runtime_mode="hybrid")
         else:
             ui_label("Section filters", "none; every SIS section matching the course code can be selected", "yellow")
 
-    if runtime_mode == "visible":
+    if runtime_mode == "visible" and options.get("visible_after_selection") == "handoff":
         ui_label("Final request mode", "MANUAL BROWSER HANDOFF (the bot will not submit)", "green")
     else:
         mode_text = "LIVE" if options["live"] else "DRY-RUN"
         ui_label("Final request mode", style(mode_text, "bold", "red" if options["live"] else "green"), "red" if options["live"] else "green")
+        if runtime_mode == "visible":
+            ui_label("After visible selection", "CONTINUE AUTOMATICALLY", "cyan")
 
     if runtime_mode == "api":
         logger.info("Plan review complete. Starting direct HTTP login and registration-open checking.")
@@ -2827,16 +2840,19 @@ def main(runtime_mode="hybrid"):
         if not client.click_selected_sections_in_browser():
             sys.exit(1)
 
-        ui_header("Selection Ready - Student Takes Over")
-        client.show_selected_course_summary()
-        ui_label("Bot submission", "DISABLED", "green")
-        ui_note("The bot has not submitted the selection and will not handle the CAPTCHA.")
-        ui_item("Continue entirely in the open Chrome window.", "cyan")
-        ui_item("Review the selected lectures/tutorials and click the SIS Next button yourself.")
-        ui_item("Complete the CAPTCHA, final review, and registration manually in SIS.")
-        input(style("Press Enter here only after you are finished in Chrome...", "bold", "yellow"))
-        logger.info("Visible handoff finished. The bot did not submit any SIS registration request.")
-        return
+        if options.get("visible_after_selection") == "handoff":
+            ui_header("Selection Ready - Student Takes Over")
+            client.show_selected_course_summary()
+            ui_label("Bot submission", "DISABLED", "green")
+            ui_note("The bot has not submitted the selection and will not handle the CAPTCHA.")
+            ui_item("Continue entirely in the open Chrome window.", "cyan")
+            ui_item("Review the selected lectures/tutorials and click the SIS Next button yourself.")
+            ui_item("Complete the CAPTCHA, final review, and registration manually in SIS.")
+            input(style("Press Enter here only after you are finished in Chrome...", "bold", "yellow"))
+            logger.info("Visible handoff finished. The bot did not submit any SIS registration request.")
+            return
+
+        logger.info("Visible selection is complete. Continuing with the automated registration flow.")
 
     if not client.confirm_selection_before_submit():
         logger.info("Cancelled before submitting any selected lectures to SIS.")

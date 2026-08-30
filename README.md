@@ -54,9 +54,9 @@ launch a browser, and its section-source menu therefore offers saved schedule-pl
 import or manual filters rather than opening schedule-plan. `register_visible.py`
 keeps each clicked item outlined during the fast visible selection pass, then verifies
 that Chrome's selected `SchId` values exactly match the intended payload. It stops if
-the website removes a selection because of a conflict. After selection, the bot makes
-no submission: the student reviews the page, clicks Next, completes the CAPTCHA, and
-finishes registration manually in Chrome.
+the website removes a selection because of a conflict. At startup, the student chooses
+whether the program stops after selection for a manual Chrome handoff, or continues
+through the automated registration flow.
 
 Prebuilt Windows versions are written to `dist/` as `registrationscript.exe`,
 `registrationscript-lite.exe`, `registrationscript-api.exe`, and
@@ -143,7 +143,7 @@ executables through `.github/workflows/release.yml`:
 |---|---|---|
 | `registrationscript.exe` | Automatic OCR plus SIS validation | Standard Chrome-assisted registration flow. |
 | `registrationscript-lite.exe` | Manual entry plus SIS validation | Smaller standard build without the OCR model. |
-| `registrationscript-visible.exe` | Completed manually by the student in Chrome | Rapidly clicks and highlights every lecture/tutorial, then stops without submitting so the student can continue. |
+| `registrationscript-visible.exe` | Automatic OCR when continuing; manual when handed off | Rapidly clicks and highlights every lecture/tutorial, then follows the student's startup choice: manual handoff or automatic continuation. |
 | `registrationscript-api.exe` | Automatic OCR plus SIS validation | Direct SIS HTTP/Ext.NET flow without opening Chrome. |
 
 The packaged EXEs include Python and the Python libraries they use, so friends do

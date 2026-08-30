@@ -180,6 +180,7 @@ class VisibleSelectionTests(unittest.TestCase):
             "schedule_plan_name": None,
             "schedule_source": "manual",
             "live": False,
+            "visible_after_selection": "handoff",
         }
         driver = object()
         with (
@@ -194,6 +195,88 @@ class VisibleSelectionTests(unittest.TestCase):
             register.main("visible")
 
         self.assertEqual(["clicked", "summary"], calls)
+
+    def test_visible_main_can_continue_automatically(self):
+        calls = []
+
+        class FakeStore:
+            def __init__(self, remember=True):
+                pass
+
+            def ensure_login_credentials(self):
+                return "student", "password"
+
+        class FakeClient:
+            def __init__(self, *args, **kwargs):
+                self.registration_html = None
+                self.registration_table_ready = False
+
+            def get_registration_page(self):
+                return True
+
+            def accept_approval(self):
+                return True
+
+            def get_timetable_and_select_course(self, *args, **kwargs):
+                return True
+
+            def click_selected_sections_in_browser(self):
+                calls.append("clicked")
+                return True
+
+            def confirm_selection_before_submit(self):
+                calls.append("confirmed-selection")
+                return True
+
+            def submit_selection(self):
+                calls.append("submitted-selection")
+                return True
+
+            def confirm_final_registration_request(self):
+                calls.append("confirmed-final")
+                return True
+
+            def solve_captcha(self, manual=False):
+                calls.append("captcha")
+                return "1234"
+
+            def finalize_registration(self, captcha_text, password):
+                calls.append("finalized")
+                return True
+
+        options = {
+            "course": "CMPS211",
+            "specific_sections": [],
+            "interactive": False,
+            "use_schedule_plan": False,
+            "schedule_plan_student_id": "student",
+            "schedule_plan_name": None,
+            "schedule_source": "manual",
+            "live": False,
+            "visible_after_selection": "automatic",
+        }
+        driver = object()
+        with (
+            patch.object(register, "CredentialStore", FakeStore),
+            patch.object(register, "collect_cli_options", return_value=options),
+            patch.object(register, "confirm_pre_open_plan"),
+            patch.object(register, "login_with_selenium", return_value=({"sid": "cookie"}, None, None, driver)),
+            patch.object(register, "wait_for_registration_to_open_in_browser", return_value="registration page"),
+            patch.object(register, "RegistrationClient", FakeClient),
+        ):
+            register.main("visible")
+
+        self.assertEqual(
+            [
+                "clicked",
+                "confirmed-selection",
+                "submitted-selection",
+                "confirmed-final",
+                "captcha",
+                "finalized",
+            ],
+            calls,
+        )
 
 
 if __name__ == "__main__":

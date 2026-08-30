@@ -30,30 +30,43 @@ jobs:
           pip install -r requirements-ocr.txt
           pip install pyinstaller
 
-      - name: Build EXE (full)
-        run: python -m PyInstaller --clean --noconfirm RegistrationBOT.spec
-
-      - name: Verify EXE exists
+      - name: Build EXEs (full, API, and visible-click)
+        shell: pwsh
         run: |
-          if (!(Test-Path "dist\registrationscript.exe")) {
-            Write-Error "EXE not found after build!"
-            exit 1
+          $specs = @(
+            "RegistrationBOT.spec",
+            "RegistrationBOT-api.spec",
+            "RegistrationBOT-visible.spec"
+          )
+          foreach ($spec in $specs) {
+            python -m PyInstaller --clean --noconfirm $spec
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
-          Write-Host "EXE size: $((Get-Item 'dist\registrationscript.exe').length / 1MB) MB"
 
-      - name: Bundle full ZIP
+      - name: Verify full EXEs exist
+        shell: pwsh
         run: |
-          Compress-Archive -Force -Path `
-            "dist\registrationscript.exe", `
-            ".registration_bot_credentials.example.json", `
-            "README.md" `
-            -DestinationPath "registrationscript-${{ github.ref_name }}-windows.zip"
+          $executables = @(
+            "dist\registrationscript.exe",
+            "dist\registrationscript-api.exe",
+            "dist\registrationscript-visible.exe"
+          )
+          foreach ($executable in $executables) {
+            if (!(Test-Path $executable)) {
+              Write-Error "$executable not found after build!"
+              exit 1
+            }
+            Write-Host "$executable size: $((Get-Item $executable).length / 1MB) MB"
+          }
 
-      - name: Upload full ZIP as artifact
+      - name: Upload full EXEs as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: full-zip
-          path: registrationscript-${{ github.ref_name }}-windows.zip
+          name: full-exes
+          path: |
+            dist/registrationscript.exe
+            dist/registrationscript-visible.exe
+            dist/registrationscript-api.exe
 
   # ── Lite build: no ddddocr/onnxruntime, much smaller, manual CAPTCHA only ───
   build-lite:
@@ -86,46 +99,41 @@ jobs:
           }
           Write-Host "Lite EXE size: $((Get-Item 'dist\registrationscript-lite.exe').length / 1MB) MB"
 
-      - name: Bundle lite ZIP
-        run: |
-          Compress-Archive -Force -Path `
-            "dist\registrationscript-lite.exe", `
-            ".registration_bot_credentials.example.json", `
-            "README.md" `
-            -DestinationPath "registrationscript-${{ github.ref_name }}-windows-lite.zip"
-
-      - name: Upload lite ZIP as artifact
+      - name: Upload lite EXE as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lite-zip
-          path: registrationscript-${{ github.ref_name }}-windows-lite.zip
+          name: lite-exe
+          path: dist/registrationscript-lite.exe
 
-  # ── Publish: create one GitHub Release with both ZIPs attached ───────────────
+  # ── Publish: create one GitHub Release with all four EXEs attached ──────────
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
     needs: [build-full, build-lite]
 
     steps:
-      - name: Download full ZIP
+      - name: Download full EXEs
         uses: actions/download-artifact@v4
         with:
-          name: full-zip
+          name: full-exes
+          path: release-files
 
-      - name: Download lite ZIP
+      - name: Download lite EXE
         uses: actions/download-artifact@v4
         with:
-          name: lite-zip
+          name: lite-exe
+          path: release-files
 
-      - name: Calculate ZIP sizes
+      - name: Calculate EXE sizes
         run: |
           python - <<'PY' >> "$GITHUB_ENV"
           import os
 
-          ref_name = os.environ["GITHUB_REF_NAME"]
           files = {
-              "FULL_ZIP_SIZE": f"registrationscript-{ref_name}-windows.zip",
-              "LITE_ZIP_SIZE": f"registrationscript-{ref_name}-windows-lite.zip",
+              "NORMAL_EXE_SIZE": "release-files/registrationscript.exe",
+              "LITE_EXE_SIZE": "release-files/registrationscript-lite.exe",
+              "VISIBLE_EXE_SIZE": "release-files/registrationscript-visible.exe",
+              "API_EXE_SIZE": "release-files/registrationscript-api.exe",
           }
 
           for env_name, path in files.items():
@@ -133,7 +141,7 @@ jobs:
               print(f"{env_name}={size_mb:.1f} MB")
           PY
 
-      - name: Create GitHub Release and upload both ZIPs
+      - name: Create GitHub Release and upload all four EXEs
         uses: softprops/action-gh-release@v2
         with:
           name: "RegistrationScript ${{ github.ref_name }}"
@@ -142,24 +150,28 @@ jobs:
 
             ### Which download should I pick?
 
-            | File | Size | Auto-CAPTCHA | Notes |
+            | File | Size | CAPTCHA | What it does |
             |---|---|---|---|
-            | `registrationscript-${{ github.ref_name }}-windows.zip` | ${{ env.FULL_ZIP_SIZE }} | ✅ Yes (ddddocr) | Recommended – solves CAPTCHAs automatically |
-            | `registrationscript-${{ github.ref_name }}-windows-lite.zip` | ${{ env.LITE_ZIP_SIZE }} | ❌ No | You'll be prompted to type the CAPTCHA manually |
+            | `registrationscript.exe` | ${{ env.NORMAL_EXE_SIZE }} | Automatic OCR + SIS validation | Standard version. Opens Chrome for login and registration monitoring, then submits the selected schedule. |
+            | `registrationscript-lite.exe` | ${{ env.LITE_EXE_SIZE }} | Manual entry + SIS validation | Smaller standard version without the OCR model. You type the CAPTCHA shown by SIS. |
+            | `registrationscript-visible.exe` | ${{ env.VISIBLE_EXE_SIZE }} | Automatic OCR + SIS validation | Visible version. Chrome rapidly clicks and highlights every selected lecture/tutorial before submission. |
+            | `registrationscript-api.exe` | ${{ env.API_EXE_SIZE }} | Automatic OCR + SIS validation | Direct API version. Uses the SIS HTTP/Ext.NET endpoints without opening Chrome. |
 
             ### Quick Start (Windows – no Python needed)
-            1. Download your preferred ZIP above and extract it to a normal writable folder.
-            2. *(Optional)* Rename `.registration_bot_credentials.example.json` → `.registration_bot_credentials.json` and fill in your credentials so you aren't prompted every run.
-            3. Double-click the `.exe` (or run it from a terminal).
+            1. Download one of the four EXEs above to a normal writable folder.
+            2. Double-click the EXE (or run it from a terminal).
+            3. The first run asks for your SIS Student ID and password and saves them locally for later runs.
 
-            **Runtime requirement:** Windows 10/11 with Google Chrome installed, plus internet access to SIS. Python and pip are not required for these ZIPs. The first run may download a matching ChromeDriver automatically.
+            **Runtime requirement:** Windows 10/11 and internet access to SIS. The normal, lite, and visible versions require Google Chrome; the direct API version does not open Chrome. Python and pip are not required.
 
             ### What's new
             See the [commit history](../../commits/${{ github.ref_name }}) for details.
 
             > **Disclaimer:** Use only on accounts you are authorised to access and in compliance with your institution's policies.
           files: |
-            registrationscript-${{ github.ref_name }}-windows.zip
-            registrationscript-${{ github.ref_name }}-windows-lite.zip
+            release-files/registrationscript.exe
+            release-files/registrationscript-lite.exe
+            release-files/registrationscript-visible.exe
+            release-files/registrationscript-api.exe
           draft: false
           prerelease: false

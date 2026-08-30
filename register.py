@@ -837,6 +837,22 @@ def normalize_section_type(value):
     return text
 
 
+def normalize_group_number(value):
+    """Return a comparable numeric group label, such as ``"2"`` from 2 or "G2"."""
+    if value is None:
+        return None
+    match = re.search(r"\d+", str(value).strip())
+    if not match:
+        return None
+    return str(int(match.group(0)))
+
+
+def extract_sis_group_number(name):
+    """Extract the SIS section group from a lecture name ending in ``_N(…)``."""
+    match = re.search(r"_(\d+)\s*(?:\([^)]*\))?\s*$", name or "")
+    return normalize_group_number(match.group(1)) if match else None
+
+
 def decimal_time_from_text(value):
     if not value:
         return None
@@ -878,6 +894,7 @@ def build_schedule_plan_mapping(planned_sections, sis_lectures):
     for section in planned_sections:
         course_code = section.get("courseCode")
         section_type = normalize_section_type(section.get("type"))
+        planned_group = normalize_group_number(section.get("group"))
         sessions = planned_session_times(section)
         section_matches = []
         section_errors = []
@@ -901,11 +918,33 @@ def build_schedule_plan_mapping(planned_sections, sis_lectures):
                     candidates.append(lecture)
 
             if candidates:
+                unique_candidate_schids = {
+                    candidate.get("sch_id") for candidate in candidates if candidate.get("sch_id")
+                }
+                if len(unique_candidate_schids) > 1 and planned_group:
+                    group_candidates = [
+                        candidate
+                        for candidate in candidates
+                        if normalize_group_number(candidate.get("group")) == planned_group
+                    ]
+                    if group_candidates:
+                        candidates = group_candidates
+
                 unique_schids = [c.get("sch_id") for c in candidates if c.get("sch_id")]
                 if len(set(unique_schids)) > 1:
+                    candidate_groups = sorted({
+                        normalize_group_number(candidate.get("group"))
+                        for candidate in candidates
+                        if normalize_group_number(candidate.get("group"))
+                    })
+                    group_detail = (
+                        f"; requested group {planned_group}, SIS groups: {', '.join(candidate_groups)}"
+                        if planned_group and candidate_groups
+                        else ""
+                    )
                     section_errors.append(
                         f"{course_code} {section.get('type')} {day} is ambiguous "
-                        f"(matches SchIds: {', '.join(unique_schids)})"
+                        f"(matches SchIds: {', '.join(unique_schids)}{group_detail})"
                     )
                     continue
                 for candidate in candidates:
@@ -1199,6 +1238,95 @@ def launch_visible_chrome():
     return None
 
 
+def login_with_requests(user_id, password):
+    """Log in to SIS using its Ext.NET HTTP DirectEvent without launching Chrome."""
+    session = requests.Session()
+
+    try:
+        logger.info("Fetching the SIS login form over HTTP...")
+        login_page = session.get(BASE_URL, timeout=30)
+        login_page.raise_for_status()
+        payload = {}
+        for field_name in ("__VIEWSTATE", "__VIEWSTATEGENERATOR", "__EVENTVALIDATION"):
+            field_tag = re.search(
+                rf"<input\b(?=[^>]*\bname=[\"']{re.escape(field_name)}[\"'])[^>]*>",
+                login_page.text,
+                re.IGNORECASE,
+            )
+            if not field_tag:
+                logger.error(f"Could not find {field_name} in the SIS login form.")
+                return None, None, None
+            value_match = re.search(r"\bvalue=[\"']([^\"']*)[\"']", field_tag.group(0), re.IGNORECASE)
+            payload[field_name] = html_lib.unescape(value_match.group(1) if value_match else "")
+        resource_manager_match = re.search(
+            r"Ext\.net\.ResourceMgr\.init\(\{id:\"([^\"]+)\"",
+            login_page.text,
+        )
+        login_button_match = re.search(
+            r"buttons:\s*\[\s*\{id:\"([^\"]+)\".*?text:\"Login\"",
+            login_page.text,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if not resource_manager_match or not login_button_match:
+            logger.error("Could not identify the SIS Ext.NET login controls.")
+            return None, None, None
+
+        resource_manager_id = resource_manager_match.group(1)
+        login_button_id = login_button_match.group(1)
+        payload.update(
+            {
+                "__EVENTTARGET": resource_manager_id,
+                "__EVENTARGUMENT": f"{login_button_id}|event|Click",
+                "txtUsername": user_id,
+                "txtPassword": password,
+            }
+        )
+        headers = {
+            "X-Requested-With": "XMLHttpRequest",
+            "X-Ext.Net": "delta=true",
+            "Referer": login_page.url,
+        }
+
+        logger.info("Logging in through the SIS HTTP endpoint...")
+        login_response = session.post(
+            login_page.url,
+            data=payload,
+            headers=headers,
+            timeout=30,
+        )
+        login_response.raise_for_status()
+
+        redirect_match = re.search(
+            r"window\.location=\\?\"([^\"]*?/SIS/Default\.aspx)\\?\"",
+            login_response.text,
+            re.IGNORECASE,
+        )
+        if not redirect_match:
+            logger.error("Direct SIS login was rejected or returned an unexpected response.")
+            return None, None, None
+
+        default_url = urljoin(login_page.url, redirect_match.group(1).replace(r"\/", "/"))
+        default_page = session.get(default_url, timeout=30)
+        default_page.raise_for_status()
+        if "/SIS/Default.aspx" not in default_page.url and "Window1" in default_page.text:
+            logger.error("Direct SIS login did not create an authenticated session.")
+            return None, None, None
+
+        std_guid = None
+        guid_match = re.search(r"FileName=([a-f0-9\-]{36})", default_page.text, re.IGNORECASE)
+        if not guid_match:
+            guid_match = re.search(r"stdid=([a-f0-9\-]{36,37})", default_page.text, re.IGNORECASE)
+        if guid_match:
+            std_guid = guid_match.group(1)
+            logger.info(f"Found Student GUID after direct login: {std_guid}")
+
+        logger.info("Direct HTTP login succeeded; Chrome was not opened.")
+        return session, std_guid, default_page.text
+    except requests.RequestException as exc:
+        logger.error(f"Direct SIS login failed: {exc}")
+        return None, None, None
+
+
 def login_with_selenium(user_id, password, wait_for_registration=False):
     """Use Selenium to handle login and extract session cookies."""
     logger.info("Launching visible Selenium Chrome for login.")
@@ -1284,9 +1412,11 @@ class RegistrationClient:
         browser_driver=None,
         selection_source=None,
         force_preserve_course_codes=None,
+        session=None,
     ):
-        self.session = requests.Session()
-        self.session.cookies.update(cookies)
+        self.session = session or requests.Session()
+        if cookies:
+            self.session.cookies.update(cookies)
         self.dry_run = dry_run
         self.credential_store = credential_store
         self.viewstate = None
@@ -1787,9 +1917,11 @@ class RegistrationClient:
                 lectures.append({
                     "day": day_name,
                     "code": lecture.attrib.get('Code', ''),
+                    "name": lecture.attrib.get('Name', ''),
                     "type": lecture.attrib.get('Type', ''),
                     "period": lecture.attrib.get('Period', ''),
                     "period_label": format_period_with_time(lecture.attrib.get('Period', '')),
+                    "group": extract_sis_group_number(lecture.attrib.get('Name', '')),
                     "sch_id": lecture.attrib.get('SchId'),
                     "selected": lecture.attrib.get('Selected') == '1',
                 })
@@ -2015,6 +2147,88 @@ class RegistrationClient:
         ui_label("Raw selection string that will be sent", self.selected_lectures_str, "yellow")
 
         return parse_yes_no("\nSubmit this selection to SIS?", default=False)
+
+    def click_selected_sections_in_browser(self, pause_seconds=0.05):
+        """Visibly click each newly chosen lecture/tutorial using the SIS page's own handler."""
+        if not self.browser_driver:
+            logger.error("Visible section clicking requires an active Chrome window.")
+            return False
+
+        targets = self.new_selected_details
+        if not targets:
+            logger.info("All requested sections were already selected in SIS; there is nothing new to click.")
+        else:
+            ui_subheader("Visible Browser Selection")
+            ui_note("Chrome will scroll to and click each lecture/tutorial in order.")
+
+        click_script = """
+            const schId = String(arguments[0]);
+            if (!window.TimeTable) {
+                return {found: false, reason: "TimeTable is not available"};
+            }
+            for (const day of window.TimeTable) {
+                for (const lecture of day.Lectures) {
+                    if (String(lecture.SchId) !== schId) continue;
+                    const element = document.getElementById(lecture.ElementID);
+                    if (!element) {
+                        return {found: false, reason: "lecture element is missing"};
+                    }
+                    element.scrollIntoView({behavior: "auto", block: "center", inline: "center"});
+                    element.style.outline = "4px solid #ff00ff";
+                    element.style.outlineOffset = "3px";
+                    if (!lecture.Selected) element.click();
+                    return {
+                        found: true,
+                        selected: Boolean(lecture.Selected),
+                        elementId: lecture.ElementID
+                    };
+                }
+            }
+            return {found: false, reason: "SchId was not found in TimeTable"};
+        """
+
+        for lecture in targets:
+            sch_id = str(lecture.get("sch_id") or "")
+            ui_item(f"{self.format_lecture_line(lecture)}", "cyan")
+            result = self.browser_driver.execute_script(click_script, sch_id) or {}
+            if not result.get("found"):
+                logger.error(
+                    f"Could not show SchId={sch_id} in Chrome: "
+                    f"{result.get('reason', 'unknown browser error')}"
+                )
+                return False
+            if not result.get("selected"):
+                logger.error(f"Chrome did not keep SchId={sch_id} selected after clicking it.")
+                return False
+            time.sleep(max(0, pause_seconds))
+
+        selected_in_browser = self.browser_driver.execute_script(
+            """
+            const selected = [];
+            if (!window.TimeTable) return selected;
+            for (const day of window.TimeTable) {
+                for (const lecture of day.Lectures) {
+                    if (lecture.Selected) selected.push(String(lecture.SchId));
+                }
+            }
+            if (typeof GetSelectedLectures === "function") GetSelectedLectures();
+            return selected;
+            """
+        ) or []
+        expected = {str(lecture["sch_id"]) for lecture in self.selected_lecture_details}
+        actual = {str(sch_id) for sch_id in selected_in_browser}
+        if actual != expected:
+            missing = sorted(expected - actual)
+            unexpected = sorted(actual - expected)
+            if missing:
+                logger.error("Chrome removed/conflicted with intended SchIds: " + ", ".join(missing))
+            if unexpected:
+                logger.error("Chrome contains unexpected selected SchIds: " + ", ".join(unexpected))
+            logger.error("Stopping so the HTTP payload cannot disagree with what is visible in Chrome.")
+            return False
+
+        logger.info("Chrome's visible selections exactly match the intended registration payload.")
+        return True
 
     def confirm_final_registration_request(self):
         ui_header("Final Registration Request Review")
@@ -2402,21 +2616,28 @@ class RegistrationClient:
                 and "register" not in lowered[:500].lower())
         )
 
-def collect_cli_options(user_id, credential_store):
-    ui_header("SIS Registration Bot")
+def collect_cli_options(user_id, credential_store, runtime_mode="hybrid"):
+    titles = {
+        "api": "SIS Registration Bot - Direct HTTP/API",
+        "visible": "SIS Registration Bot - Visible Browser Selection",
+    }
+    ui_header(titles.get(runtime_mode, "SIS Registration Bot"))
     if len(sys.argv) > 1:
         print(style("Note: command-line options are ignored in this interactive version.", "yellow"))
 
     if os.path.exists(CREDENTIALS_FILE):
         ui_label("Saved credentials file", os.path.abspath(CREDENTIALS_FILE), "green")
 
+    section_modes = [
+        ("saved_schedule", "Import your saved schedule-plan schedule"),
+        ("manual", "Type before login: course code, then filters like Sunday 4-6"),
+    ]
+    if runtime_mode != "api":
+        section_modes.insert(0, ("gui", "Open schedule-plan, then import what you picked"))
+
     mode = prompt_choice(
         "How do you want to choose sections?",
-        [
-            ("gui", "Open schedule-plan, then import what you picked"),
-            ("saved_schedule", "Import your saved schedule-plan schedule"),
-            ("manual", "Type before login: course code, then filters like Sunday 4-6"),
-        ],
+        section_modes,
     )
 
     options = {
@@ -2473,7 +2694,7 @@ def collect_cli_options(user_id, credential_store):
     return options
 
 
-def confirm_pre_open_plan(options, planned_sections=None):
+def confirm_pre_open_plan(options, planned_sections=None, runtime_mode="hybrid"):
     """Lock the user's intent before the bot starts checking whether registration is open."""
     ui_header("Pre-Open Plan Review")
 
@@ -2503,13 +2724,21 @@ def confirm_pre_open_plan(options, planned_sections=None):
     mode_text = "LIVE" if options["live"] else "DRY-RUN"
     ui_label("Final request mode", style(mode_text, "bold", "red" if options["live"] else "green"), "red" if options["live"] else "green")
 
-    logger.info("Plan review complete. Starting visible Chrome and registration-open checking.")
+    if runtime_mode == "api":
+        logger.info("Plan review complete. Starting direct HTTP login and registration-open checking.")
+    elif runtime_mode == "visible":
+        logger.info("Plan review complete. Chrome will visibly click each matched lecture/tutorial.")
+    else:
+        logger.info("Plan review complete. Starting visible Chrome and registration-open checking.")
 
 
-def main():
+def main(runtime_mode="hybrid"):
+    if runtime_mode not in {"hybrid", "api", "visible"}:
+        raise ValueError(f"Unknown runtime mode: {runtime_mode}")
+
     credential_store = CredentialStore(remember=True)
     user_id, password = credential_store.ensure_login_credentials()
-    options = collect_cli_options(user_id, credential_store)
+    options = collect_cli_options(user_id, credential_store, runtime_mode=runtime_mode)
     planned_sections = None
 
     if options["use_schedule_plan"]:
@@ -2527,13 +2756,20 @@ def main():
         log_schedule_plan_preview(planned_sections, source_label)
         logger.info(f"Imported {len(planned_sections)} selected sections from schedule-plan.")
 
-    confirm_pre_open_plan(options, planned_sections=planned_sections)
+    confirm_pre_open_plan(options, planned_sections=planned_sections, runtime_mode=runtime_mode)
 
     # 1. Login before registration opens, but do not start polling until the plan is locked.
     browser_driver = None
-    cookies, std_guid, registration_html, browser_driver = login_with_selenium(user_id, password)
+    direct_session = None
+    if runtime_mode == "api":
+        direct_session, std_guid, _ = login_with_requests(user_id, password)
+        cookies = direct_session.cookies.get_dict() if direct_session else None
+        registration_html = None
+    else:
+        cookies, std_guid, registration_html, browser_driver = login_with_selenium(user_id, password)
     if not cookies:
-        pause_if_frozen("Login/browser startup failed. Press Enter to close...")
+        failure_label = "Direct HTTP login failed" if runtime_mode == "api" else "Login/browser startup failed"
+        pause_if_frozen(f"{failure_label}. Press Enter to close...")
         sys.exit(1)
         
     client = RegistrationClient(
@@ -2549,12 +2785,14 @@ def main():
         # the normal CLI flow. Pass an explicit empty set so saved legacy
         # values do not silently re-enable it.
         force_preserve_course_codes=set(),
+        session=direct_session,
     )
 
-    # 2. Keep visible Chrome checking until SIS shows the registration timetable.
-    registration_html = wait_for_registration_to_open_in_browser(browser_driver)
-    client.registration_html = registration_html
-    client.registration_table_ready = bool(registration_html)
+    # 2. Keep checking until SIS shows the registration timetable.
+    if browser_driver:
+        registration_html = wait_for_registration_to_open_in_browser(browser_driver)
+        client.registration_html = registration_html
+        client.registration_table_ready = bool(registration_html)
     
     # 3. Get Page
     if not client.get_registration_page():
@@ -2573,6 +2811,9 @@ def main():
         options["specific_sections"],
         interactive=options["interactive"],
     ):
+        sys.exit(1)
+
+    if runtime_mode == "visible" and not client.click_selected_sections_in_browser():
         sys.exit(1)
 
     if not client.confirm_selection_before_submit():
@@ -2624,9 +2865,11 @@ def main():
     if browser_driver:
         logger.info("Chrome is still open for inspection. Close it manually when you are done.")
 
-if __name__ == "__main__":
+
+def run_entrypoint(runtime_mode="hybrid"):
+    """Run one script variant with consistent CLI error handling."""
     try:
-        main()
+        main(runtime_mode=runtime_mode)
     except KeyboardInterrupt:
         logger.info("Cancelled by user.")
         pause_if_frozen("Cancelled. Press Enter to close...")
@@ -2641,3 +2884,6 @@ if __name__ == "__main__":
         traceback.print_exc()
         pause_if_frozen("Unexpected crash. Press Enter to close...")
         raise SystemExit(1)
+
+if __name__ == "__main__":
+    run_entrypoint("hybrid")

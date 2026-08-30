@@ -38,6 +38,28 @@ Run the script:
 python register.py
 ```
 
+Two additional entry points use the same selection and safety logic while changing
+how SIS is controlled:
+
+```bash
+# No Chrome/Selenium: login, polling, selection, and final registration use HTTP.
+python register_api.py
+
+# Chrome visibly scrolls to and clicks every newly selected lecture/tutorial.
+python register_visible.py
+```
+
+`register_api.py` talks directly to the SIS Ext.NET HTTP endpoints. It does not
+launch a browser, and its section-source menu therefore offers saved schedule-plan
+import or manual filters rather than opening schedule-plan. `register_visible.py`
+keeps each clicked item outlined during the fast visible selection pass, then verifies that Chrome's selected
+`SchId` values exactly match the intended payload. It stops if the website removes
+a selection because of a conflict.
+
+Prebuilt Windows versions are written to `dist/` as `registrationscript.exe`,
+`registrationscript-lite.exe`, `registrationscript-api.exe`, and
+`registrationscript-visible.exe`.
+
 The script is now an interactive CLI. It asks what you want to do instead of requiring command-line flags. In modern Windows terminals, menus and confirmations use colors plus Up/Down arrow selection. If the terminal does not support that, the script falls back to typed input.
 
 You can choose from:
@@ -83,6 +105,8 @@ When typing section filters manually, use:
 - Time range format: `Day 4-6` or `Day 4:00-6:00`
 
 The script logs both SIS slot and real time (example: `9:10 (4:00-5:50)`).
+When schedule-plan contains two tutorials at the same day and time, the importer
+uses the section group number to select the matching SIS tutorial.
 
 ## Safety Notes
 
@@ -100,17 +124,25 @@ The script logs both SIS slot and real time (example: `9:10 (4:00-5:50)`).
 ## Repository Layout
 
 - `register.py`: Main automation script
+- `register_api.py`: Direct HTTP/API variant (no Chrome/Selenium launch)
+- `register_visible.py`: Visible Chrome-clicking variant
+- `RegistrationBOT-api.spec`: PyInstaller build for the API executable
+- `RegistrationBOT-visible.spec`: PyInstaller build for the visible-click executable
 - `requirements.txt`: Python dependencies
 - `.registration_bot_credentials.example.json`: Placeholder credentials/config template
 - `.gitignore`: Excludes sensitive/generated files
 
 ## Making a Release
 
-Pushing a version tag automatically builds and publishes two Windows ZIPs through
-`.github/workflows/release.yml`:
+Pushing a version tag automatically builds and publishes four individual Windows
+executables through `.github/workflows/release.yml`:
 
-- `registrationscript-<tag>-windows.zip`: `registrationscript.exe` with automatic CAPTCHA solving.
-- `registrationscript-<tag>-windows-lite.zip`: `registrationscript-lite.exe`, with manual CAPTCHA entry and a smaller download.
+| Release file | CAPTCHA | Purpose |
+|---|---|---|
+| `registrationscript.exe` | Automatic OCR plus SIS validation | Standard Chrome-assisted registration flow. |
+| `registrationscript-lite.exe` | Manual entry plus SIS validation | Smaller standard build without the OCR model. |
+| `registrationscript-visible.exe` | Automatic OCR plus SIS validation | Rapidly clicks and highlights every lecture/tutorial in Chrome before submission. |
+| `registrationscript-api.exe` | Automatic OCR plus SIS validation | Direct SIS HTTP/Ext.NET flow without opening Chrome. |
 
 The packaged EXEs include Python and the Python libraries they use, so friends do
 not need Python, pip, or `requirements.txt`. They do need Windows 10/11, Google
@@ -127,7 +159,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-3. GitHub Actions builds both EXEs and creates the release automatically.
+3. GitHub Actions builds all four EXEs and attaches them directly to the release.
 
 For source usage instead of a packaged release, install `requirements.txt` and run
 `python register.py`. The optional `ddddocr` package enables automatic CAPTCHA

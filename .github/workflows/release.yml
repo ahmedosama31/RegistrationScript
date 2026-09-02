@@ -2,6 +2,8 @@ name: Build & Release
 
 on:
   push:
+    branches:
+      - 'codex/macos-release' # temporary validation branch; removed after CI passes
     tags:
       - 'v*'          # triggers on v0.1.0, v1.2.3, etc.
 
@@ -105,11 +107,85 @@ jobs:
           name: lite-exe
           path: dist/registrationscript-lite.exe
 
-  # ── Publish: create one GitHub Release with all four EXEs attached ──────────
+  # ── Native macOS builds: Apple Silicon and Intel ────────────────────────────
+  build-macos:
+    name: Build macOS (${{ matrix.display_name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            display_name: Apple Silicon
+            asset_suffix: apple-silicon
+          - runner: macos-15-intel
+            display_name: Intel
+            asset_suffix: intel
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-ocr.txt
+          pip install pyinstaller
+
+      - name: Build all four macOS executables
+        run: |
+          for spec in \
+            RegistrationBOT.spec \
+            RegistrationBOT-lite.spec \
+            RegistrationBOT-visible.spec \
+            RegistrationBOT-api.spec
+          do
+            python -m PyInstaller --clean --noconfirm "$spec"
+          done
+
+      - name: Verify, sign, and package macOS executables
+        env:
+          ASSET_SUFFIX: ${{ matrix.asset_suffix }}
+        run: |
+          package_dir="RegistrationScript-macos-${ASSET_SUFFIX}"
+          mkdir "$package_dir"
+
+          for executable in \
+            registrationscript \
+            registrationscript-lite \
+            registrationscript-visible \
+            registrationscript-api
+          do
+            test -f "dist/$executable"
+            chmod +x "dist/$executable"
+            codesign --force --sign - "dist/$executable"
+            file "dist/$executable"
+            cp "dist/$executable" "$package_dir/$executable"
+          done
+
+          ditto -c -k --keepParent \
+            "$package_dir" \
+            "dist/registrationscript-macos-${ASSET_SUFFIX}.zip"
+          test -s "dist/registrationscript-macos-${ASSET_SUFFIX}.zip"
+
+      - name: Upload macOS package as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.asset_suffix }}
+          path: dist/registrationscript-macos-${{ matrix.asset_suffix }}.zip
+
+  # ── Publish: create one GitHub Release with Windows and macOS builds ────────
   publish:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-full, build-lite]
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-full, build-lite, build-macos]
 
     steps:
       - name: Download full EXEs
@@ -124,7 +200,19 @@ jobs:
           name: lite-exe
           path: release-files
 
-      - name: Calculate EXE sizes
+      - name: Download Apple Silicon package
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-apple-silicon
+          path: release-files
+
+      - name: Download Intel Mac package
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-intel
+          path: release-files
+
+      - name: Calculate release asset sizes
         run: |
           python - <<'PY' >> "$GITHUB_ENV"
           import os
@@ -134,6 +222,8 @@ jobs:
               "LITE_EXE_SIZE": "release-files/registrationscript-lite.exe",
               "VISIBLE_EXE_SIZE": "release-files/registrationscript-visible.exe",
               "API_EXE_SIZE": "release-files/registrationscript-api.exe",
+              "MACOS_ARM64_SIZE": "release-files/registrationscript-macos-apple-silicon.zip",
+              "MACOS_INTEL_SIZE": "release-files/registrationscript-macos-intel.zip",
           }
 
           for env_name, path in files.items():
@@ -141,7 +231,7 @@ jobs:
               print(f"{env_name}={size_mb:.1f} MB")
           PY
 
-      - name: Create GitHub Release and upload all four EXEs
+      - name: Create GitHub Release and upload Windows and macOS builds
         uses: softprops/action-gh-release@v2
         with:
           name: "RegistrationScript ${{ github.ref_name }}"
@@ -156,13 +246,20 @@ jobs:
             | `registrationscript-lite.exe` | ${{ env.LITE_EXE_SIZE }} | Manual entry + SIS validation | Smaller standard version without the OCR model. You type the CAPTCHA shown by SIS. |
             | `registrationscript-visible.exe` | ${{ env.VISIBLE_EXE_SIZE }} | Automatic OCR when continuing; manual when handed off | Visible version. At startup, choose whether Chrome hands control to the student after selecting or continues automatically. |
             | `registrationscript-api.exe` | ${{ env.API_EXE_SIZE }} | Automatic OCR + SIS validation | Direct API version. Uses the SIS HTTP/Ext.NET endpoints without opening Chrome. |
+            | `registrationscript-macos-apple-silicon.zip` | ${{ env.MACOS_ARM64_SIZE }} | All four variants | Native package for M1, M2, M3, M4, and newer Apple Silicon Macs. |
+            | `registrationscript-macos-intel.zip` | ${{ env.MACOS_INTEL_SIZE }} | All four variants | Native package for Intel-based Macs. |
 
-            ### Quick Start (Windows – no Python needed)
+            ### Quick Start (Windows — no Python needed)
             1. Download one of the four EXEs above to a normal writable folder.
             2. Double-click the EXE (or run it from a terminal).
             3. The first run asks for your SIS Student ID and password and saves them locally for later runs.
 
-            **Runtime requirement:** Windows 10/11 and internet access to SIS. The normal, lite, and visible versions require Google Chrome; the direct API version does not open Chrome. Python and pip are not required.
+            ### Quick Start (macOS — no Python needed)
+            1. In the Apple menu, choose **About This Mac** and download the ZIP matching Apple Silicon or Intel.
+            2. Extract the ZIP, open Terminal in the extracted folder, and run a variant such as `./registrationscript-visible`.
+            3. These builds are ad-hoc signed rather than Apple-notarized, so macOS may require approval in **System Settings → Privacy & Security** the first time.
+
+            **Runtime requirement:** Windows 10/11 or macOS 15+, plus internet access to SIS. The normal, lite, and visible versions require Google Chrome; the direct API version does not open Chrome. Python and pip are not required.
 
             ### What's new
             See the [commit history](../../commits/${{ github.ref_name }}) for details.
@@ -173,5 +270,7 @@ jobs:
             release-files/registrationscript-lite.exe
             release-files/registrationscript-visible.exe
             release-files/registrationscript-api.exe
+            release-files/registrationscript-macos-apple-silicon.zip
+            release-files/registrationscript-macos-intel.zip
           draft: false
           prerelease: false

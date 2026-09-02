@@ -125,6 +125,10 @@ APPROVAL_CONTROL_READY_TIMEOUT_SECONDS = 0.5
 CHROME_BINARY_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+    "/usr/bin/google-chrome",
+    "/usr/bin/google-chrome-stable",
 ]
 
 # Optional local fallback if dynamic extraction fails.
@@ -1202,7 +1206,7 @@ def wait_for_registration_to_open_in_browser(driver):
 
 
 def find_chrome_binary():
-    """Return a Chrome executable path from env/standard Windows locations, if available."""
+    """Return a Chrome executable path from env/standard OS locations, if available."""
     env_path = os.environ.get("CHROME_BINARY") or os.environ.get("GOOGLE_CHROME_BIN")
     if env_path and os.path.exists(env_path):
         return env_path
@@ -1262,8 +1266,8 @@ def launch_visible_chrome():
         errors.append("webdriver-manager is not bundled/installed")
 
     logger.error("Could not launch Chrome.")
-    logger.error("Make sure Google Chrome is installed, then run this exe from a normal folder such as Desktop or Downloads.")
-    logger.error("If Chrome is installed somewhere custom, set CHROME_BINARY to the full chrome.exe path and run again.")
+    logger.error("Make sure Google Chrome is installed, then run this program from a normal folder such as Desktop or Downloads.")
+    logger.error("If Chrome is installed somewhere custom, set CHROME_BINARY to the full Chrome executable path and run again.")
     logger.error("Browser startup errors: " + " | ".join(errors))
     return None
 

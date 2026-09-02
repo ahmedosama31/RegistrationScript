@@ -1,22 +1,34 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
+import sys
 from importlib.util import find_spec
 
 _selenium_dir = os.path.dirname(find_spec('selenium').origin)
+_selenium_manager_platform = {
+    'darwin': 'macos',
+    'win32': 'windows',
+}.get(sys.platform, 'linux')
+_selenium_manager_filename = (
+    'selenium-manager.exe' if sys.platform == 'win32' else 'selenium-manager'
+)
 _selenium_manager = os.path.join(
     _selenium_dir,
     'webdriver',
     'common',
-    'windows',
-    'selenium-manager.exe',
+    _selenium_manager_platform,
+    _selenium_manager_filename,
 )
+_truststore_backend = {
+    'darwin': 'truststore._macos',
+    'win32': 'truststore._windows',
+}.get(sys.platform, 'truststore._openssl')
 
 a = Analysis(
     ['register.py'],
     pathex=[],
     binaries=[],
     datas=[
-        (_selenium_manager, 'selenium/webdriver/common/windows'),
+        (_selenium_manager, f'selenium/webdriver/common/{_selenium_manager_platform}'),
     ],
     hiddenimports=[
         'PIL',
@@ -24,7 +36,7 @@ a = Analysis(
         'truststore',
         'truststore._api',
         'truststore._ssl_constants',
-        'truststore._windows',
+        _truststore_backend,
         'selenium.webdriver.chrome.webdriver',
         'selenium.webdriver.chrome.service',
         'selenium.webdriver.common.selenium_manager',

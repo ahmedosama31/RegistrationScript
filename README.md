@@ -60,7 +60,8 @@ through the automated registration flow.
 
 Prebuilt Windows versions are written to `dist/` as `registrationscript.exe`,
 `registrationscript-lite.exe`, `registrationscript-api.exe`, and
-`registrationscript-visible.exe`.
+`registrationscript-visible.exe`. GitHub releases also include ZIP packages with
+the same four native command-line executables for Apple Silicon and Intel Macs.
 
 The script is now an interactive CLI. It asks what you want to do instead of requiring command-line flags. In modern Windows terminals, menus and confirmations use colors plus Up/Down arrow selection. If the terminal does not support that, the script falls back to typed input.
 
@@ -139,7 +140,8 @@ ignores that unavailable section and continues with every other section it can m
 ## Making a Release
 
 Pushing a version tag automatically builds and publishes four individual Windows
-executables through `.github/workflows/release.yml`:
+executables plus native Apple Silicon and Intel macOS packages through
+`.github/workflows/release.yml`:
 
 | Release file | CAPTCHA | Purpose |
 |---|---|---|
@@ -152,6 +154,14 @@ The packaged EXEs include Python and the Python libraries they use, so friends d
 not need Python, pip, or `requirements.txt`. They do need Windows 10/11, Google
 Chrome installed, and internet access to SIS. ChromeDriver is handled automatically
 when the EXE starts; the first run may download it.
+
+The macOS ZIP packages also include all four variants and do not require Python.
+After extracting the ZIP, run the chosen variant from Terminal, for example
+`./registrationscript-visible`. Choose the Apple Silicon package for M-series Macs
+or the Intel package for older Intel Macs. The binaries are ad-hoc signed rather
+than Apple-notarized, so the first launch may require approval in **System Settings
+→ Privacy & Security**. Chrome is required for every variant except
+`registrationscript-api`.
 
 To publish a release:
 

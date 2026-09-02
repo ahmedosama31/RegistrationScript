@@ -1,6 +1,7 @@
 import sys
 import types
 import unittest
+import xml.etree.ElementTree as ET
 from unittest.mock import patch
 
 
@@ -136,6 +137,70 @@ class VisibleSelectionTests(unittest.TestCase):
     def test_visible_click_stops_when_browser_selection_conflicts(self):
         driver = FakeBrowserDriver([])
         self.assertFalse(self.client(driver).click_selected_sections_in_browser(pause_seconds=0))
+
+    def test_visible_mode_clicks_mapped_sections_when_another_section_is_unmapped(self):
+        root = ET.fromstring(
+            """
+            <TimeTable>
+              <day Name="Sunday">
+                <lecture Code="CMPS211" Name="Mapped Course-_1(0/0)"
+                         Type="Lecture" Period="9:10" SchId="42" Selected="0" />
+              </day>
+            </TimeTable>
+            """
+        )
+        planned_sections = [
+            {
+                "courseCode": "COREQ100",
+                "type": "Tutorial",
+                "sessions": [
+                    {"day": "Monday", "startString": "1:00", "endString": "3:50"}
+                ],
+            },
+            {
+                "courseCode": "CMPS211",
+                "type": "Lecture",
+                "sessions": [
+                    {"day": "Sunday", "startString": "4:00", "endString": "5:50"}
+                ],
+            },
+        ]
+        driver = FakeBrowserDriver(["42"])
+        client = register.RegistrationClient({}, browser_driver=driver)
+        client.fetch_timetable = lambda: root
+
+        self.assertTrue(client.get_timetable_and_select_schedule_plan(planned_sections))
+        self.assertEqual(",42,", client.selected_lectures_str)
+        self.assertTrue(client.click_selected_sections_in_browser(pause_seconds=0))
+        self.assertEqual(["42"], driver.clicked)
+
+    def test_visible_registration_wait_reacts_on_first_fast_poll(self):
+        class PageSequenceDriver:
+            def __init__(self):
+                self.pages = [
+                    "<html>registration closed</html>",
+                    '<html><input name="StdSelectedLecs"></html>',
+                ]
+
+            @property
+            def page_source(self):
+                if len(self.pages) > 1:
+                    return self.pages.pop(0)
+                return self.pages[0]
+
+        driver = PageSequenceDriver()
+        with (
+            patch.object(
+                register,
+                "_looks_like_registration_table_html",
+                side_effect=lambda html: "StdSelectedLecs" in html,
+            ),
+            patch.object(register.time, "sleep") as sleep,
+        ):
+            html = register._wait_for_registration_table_in_browser(driver, timeout=1)
+
+        self.assertIn("StdSelectedLecs", html)
+        sleep.assert_called_once_with(register.VISIBLE_BROWSER_POLL_INTERVAL_SECONDS)
 
     def test_visible_main_hands_off_without_submitting(self):
         calls = []

@@ -109,6 +109,8 @@ When typing section filters manually, use:
 The script logs both SIS slot and real time (example: `9:10 (4:00-5:50)`).
 When schedule-plan contains two tutorials at the same day and time, the importer
 uses the section group number to select the matching SIS tutorial.
+If a planned lecture or tutorial is not present in the SIS timetable, the importer
+ignores that unavailable section and continues with every other section it can map.
 
 ## Safety Notes
 

@@ -99,6 +99,27 @@ class SchedulePlanGroupMappingTests(unittest.TestCase):
     def test_group_is_extracted_from_sis_name_suffix(self):
         self.assertEqual(["1", "2"], [lecture["group"] for lecture in self.sis_lectures])
 
+    def test_unmapped_section_does_not_discard_other_mapped_sections(self):
+        unavailable_corequisite = {
+            "courseCode": "COREQ100",
+            "type": "Lecture",
+            "group": 1,
+            "sessions": [
+                {
+                    "day": "Sunday",
+                    "startString": "4:00",
+                    "endString": "5:50",
+                }
+            ],
+        }
+
+        selected_schids = register.map_schedule_plan_sections_to_sis(
+            [unavailable_corequisite, self.planned_section(2)],
+            self.sis_lectures,
+        )
+
+        self.assertEqual(["202"], selected_schids)
+
 
 if __name__ == "__main__":
     unittest.main()

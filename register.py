@@ -120,6 +120,8 @@ CAPTCHA_PATH = "/SIS/Modules/CaptchaImage.aspx"
 SCHEDULE_PLAN_URL = "https://schedule-plan.pages.dev/"
 SCHEDULE_PLAN_API_BASE = "https://schedule-plan.pages.dev/api"
 REGISTRATION_CHECK_INTERVAL_SECONDS = 1
+VISIBLE_BROWSER_POLL_INTERVAL_SECONDS = 0.05
+APPROVAL_CONTROL_READY_TIMEOUT_SECONDS = 0.5
 CHROME_BINARY_CANDIDATES = [
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
@@ -992,19 +994,21 @@ def log_schedule_plan_mapping_report(mapping_results):
         if errors:
             has_errors = True
             for error in errors:
-                logger.error(f"      NO MATCH -> {error}")
+                logger.warning(f"      IGNORED (NO SIS MATCH) -> {error}")
 
     logger.info(f"Mapped SIS SchIds ({len(selected_schids)}): {', '.join(selected_schids) if selected_schids else 'none'}")
+    if has_errors and selected_schids:
+        logger.warning(
+            "Some schedule-plan lectures/tutorials are not available in the SIS timetable. "
+            "They were ignored; registration will continue with every section that was mapped."
+        )
     logger.info("=" * 72)
     return selected_schids, has_errors
 
 
 def map_schedule_plan_sections_to_sis(planned_sections, sis_lectures):
     mapping_results = build_schedule_plan_mapping(planned_sections, sis_lectures)
-    selected_schids, has_errors = log_schedule_plan_mapping_report(mapping_results)
-    if has_errors:
-        return None
-
+    selected_schids, _ = log_schedule_plan_mapping_report(mapping_results)
     return selected_schids
 
 def _find_login_user_field(driver):
@@ -1103,33 +1107,55 @@ def _check_visible_agreement_checkbox(driver):
             driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", checkbox)
             driver.execute_script("arguments[0].click();", checkbox)
             logger.info("Checked the registration approval checkbox in Chrome.")
-            time.sleep(0.5)
         return True
     return False
 
 
 def _click_approval_next_if_available(driver):
     approval_checkbox_seen = _check_visible_agreement_checkbox(driver)
-    buttons = driver.find_elements(By.CSS_SELECTOR, "input[type='submit'], input[type='button'], button")
-    for button in buttons:
-        if not button.is_displayed():
-            continue
-        label = _element_label(button).lower()
-        if "next" not in label:
-            continue
-        if not button.is_enabled():
-            logger.info("Approval Next button is still disabled after checking the checkbox.")
-            time.sleep(1)
+    ready_deadline = time.monotonic() + APPROVAL_CONTROL_READY_TIMEOUT_SECONDS
+
+    while True:
+        buttons = driver.find_elements(By.CSS_SELECTOR, "input[type='submit'], input[type='button'], button")
+        next_button_seen = False
+        for button in buttons:
+            if not button.is_displayed():
+                continue
+            label = _element_label(button).lower()
+            if "next" not in label:
+                continue
+            next_button_seen = True
+            if not button.is_enabled():
+                continue
+            logger.info(f"Clicking approval button '{label or 'Next'}' in Chrome.")
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
+            driver.execute_script("arguments[0].click();", button)
             return True
-        logger.info(f"Clicking approval button '{label or 'Next'}' in Chrome.")
-        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
-        driver.execute_script("arguments[0].click();", button)
-        return True
+
+        if not approval_checkbox_seen or time.monotonic() >= ready_deadline:
+            if next_button_seen:
+                logger.info("Approval Next button is still disabled after checking the checkbox.")
+            break
+        time.sleep(VISIBLE_BROWSER_POLL_INTERVAL_SECONDS)
+
     if approval_checkbox_seen:
         logger.info("Approval checkbox was found, but Next button was not ready yet.")
-        time.sleep(1)
         return True
     return False
+
+
+def _wait_for_registration_table_in_browser(driver, timeout):
+    """Poll quickly for the timetable while preserving the closed-page retry interval."""
+    deadline = time.monotonic() + max(0, timeout)
+    while True:
+        html = driver.page_source
+        if _looks_like_registration_table_html(html):
+            return html
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(VISIBLE_BROWSER_POLL_INTERVAL_SECONDS, remaining))
 
 
 def wait_for_registration_to_open_in_browser(driver):
@@ -1150,7 +1176,9 @@ def wait_for_registration_to_open_in_browser(driver):
             return html
 
         if _click_approval_next_if_available(driver):
-            time.sleep(1)
+            _wait_for_registration_table_in_browser(
+                driver, REGISTRATION_CHECK_INTERVAL_SECONDS
+            )
             continue
 
         check_button, check_label = _find_visible_button_by_label(driver, ["check", "open"])
@@ -1168,7 +1196,9 @@ def wait_for_registration_to_open_in_browser(driver):
             driver.refresh()
 
         attempt += 1
-        time.sleep(REGISTRATION_CHECK_INTERVAL_SECONDS)
+        _wait_for_registration_table_in_browser(
+            driver, REGISTRATION_CHECK_INTERVAL_SECONDS
+        )
 
 
 def find_chrome_binary():

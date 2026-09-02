@@ -2,8 +2,6 @@ name: Build & Release
 
 on:
   push:
-    branches:
-      - 'codex/macos-release' # temporary validation branch; removed after CI passes
     tags:
       - 'v*'          # triggers on v0.1.0, v1.2.3, etc.
 
